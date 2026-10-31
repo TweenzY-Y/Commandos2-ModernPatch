@@ -178,3 +178,13 @@ the results are identical.
 `Profile=1` (development only) starts a thread that samples the main thread's EIP about
 every millisecond and logs the hottest game code addresses (16-byte buckets) and, for
 samples outside the game, the nearest game return address, every 10 seconds.
+
+## Performance: map background cache
+
+The camera's map draw `0x7e7de0` (thiscall(canvas, context), called from the world
+draw at `0x7eaeab` before the objects) draws the background tiles and the animated
+water. Between two logic ticks its output only depends on the camera, so the patch
+keeps a copy of what the tick frame drew (per camera, canvas clip rectangle) and, in
+extra frames whose camera state (position, zoom, view size, flags) and canvas are
+identical, copies it back instead of drawing again. While the camera moves everything
+is drawn normally. Part of `Optimizations=1`.

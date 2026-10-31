@@ -2211,6 +2211,101 @@ static void PatchPerformance()
     Log("rasterizer optimizations: %s%s\n", ok ? "ok" : "FAILED", badSpan ? " (water spans NOT replaced)" : "");
 }
 
+static bool IsGameCode(uint32_t a) { return a >= 0x401000 && a < 0xAE8000; }
+
+// ---------------------------------------------------------------------------
+// Map background cache. The camera's map draw 0x7e7de0 (thiscall(canvas, ctx),
+// ret 8; called from the world draw at 0x7eaeab, before the objects) draws the
+// map background tiles and the animated water. Between two logic ticks it only
+// depends on the camera, so when an extra frame has exactly the same camera as
+// the tick frame, the background drawn in the tick frame is copied back instead
+// of being drawn again. Canvas: +0 surface, +4 x, +8 y, +0xC w, +0x10 h (clip
+// rectangle in surface pixels); surface: +4 pixels, +8 pitch (bytes), +0x10 w,
+// +0x14 h.
+// ---------------------------------------------------------------------------
+namespace addr {
+    constexpr uintptr_t Site_MapDraw = 0x7eaeab;
+    constexpr uintptr_t MapDraw      = 0x7e7de0;
+}
+struct BgCache {
+    uintptr_t cam = 0;
+    uint32_t tick = 0xFFFFFFFF;
+    bool valid = false;
+    uint32_t key[16] = {};
+    int x = 0, y = 0, w = 0, h = 0;
+    std::vector<uint16_t> px;
+};
+static BgCache g_bg[4];
+static uint32_t g_bgHits = 0, g_bgMisses = 0;
+
+static int BgKey(uintptr_t cam, const int32_t* cv, uintptr_t surf, uintptr_t ctx, uint32_t* k)
+{
+    int n = 0;
+    for (int off = 0x68; off < 0x78; off += 4) k[n++] = At<uint32_t>(cam, off);   // position, 1/zoom, zoom
+    k[n++] = At<uint32_t>(cam, 0x30); k[n++] = At<uint32_t>(cam, 0x34);
+    k[n++] = At<uint32_t>(cam, 0x94); k[n++] = At<uint32_t>(cam, 0x98);
+    k[n++] = At<uint32_t>(cam, 0x90);
+    for (int i = 1; i < 5; i++) k[n++] = (uint32_t)cv[i];
+    k[n++] = At<uint32_t>(surf, 8);
+    k[n++] = ctx ? At<uint32_t>(ctx, 0x18) : 0;
+    return n;
+}
+
+typedef void(__fastcall* PFN_MapDraw)(void* cam, void* edx, void* canvas, void* ctx);
+static void __fastcall Hook_MapDraw(void* self, void* edx, void* canvas, void* ctx)
+{
+    uintptr_t cam = (uintptr_t)self;
+    const int32_t* cv = (const int32_t*)canvas;
+    uintptr_t surf = cv ? (uintptr_t)cv[0] : 0;
+    uint8_t* base = surf ? At<uint8_t*>(surf, 4) : nullptr;
+    if (!g_active || !base || !g_inGame && !g_inMenu) {
+        ((PFN_MapDraw)addr::MapDraw)(self, edx, canvas, ctx);
+        return;
+    }
+    const int pitch = At<int>(surf, 8), sw = At<int>(surf, 0x10), sh = At<int>(surf, 0x14);
+    int x0 = cv[1], y0 = cv[2], x1 = cv[1] + cv[3], y1 = cv[2] + cv[4];
+    if (x0 < 0) x0 = 0;
+    if (y0 < 0) y0 = 0;
+    if (x1 > sw) x1 = sw;
+    if (y1 > sh) y1 = sh;
+    if (x1 <= x0 || y1 <= y0) { ((PFN_MapDraw)addr::MapDraw)(self, edx, canvas, ctx); return; }
+
+    BgCache* c = nullptr;
+    for (auto& e : g_bg) if (e.cam == cam) { c = &e; break; }
+    if (!c) { static int rr = 0; c = &g_bg[rr++ & 3]; c->cam = cam; c->valid = false; }
+
+    uint32_t key[16];
+    int nk = BgKey(cam, cv, surf, (uintptr_t)ctx, key);
+    const int w = x1 - x0, h = y1 - y0;
+    if (g_inExtraFrame && c->valid && c->tick == g_tick && memcmp(key, c->key, nk * 4) == 0 &&
+        c->x == x0 && c->y == y0 && c->w == w && c->h == h) {
+        for (int y = 0; y < h; y++)
+            memcpy(base + (size_t)(y0 + y) * pitch + x0 * 2, &c->px[(size_t)y * w], (size_t)w * 2);
+        g_bgHits++;
+        return;
+    }
+    ((PFN_MapDraw)addr::MapDraw)(self, edx, canvas, ctx);
+    g_bgMisses++;
+    if (g_cfg.debug && g_bgMisses % 500 == 0)
+        Log("map background cache: %u copied, %u drawn\n", g_bgHits, g_bgMisses);
+    if (!g_inExtraFrame) {
+        // tick frame: remember the background for this tick's extra frames
+        c->px.resize((size_t)w * h);
+        for (int y = 0; y < h; y++)
+            memcpy(&c->px[(size_t)y * w], base + (size_t)(y0 + y) * pitch + x0 * 2, (size_t)w * 2);
+        memcpy(c->key, key, nk * 4);
+        c->x = x0; c->y = y0; c->w = w; c->h = h;
+        c->tick = g_tick;
+        c->valid = true;
+    }
+}
+
+static void PatchMapCache()
+{
+    bool ok = PatchCallRel32(addr::Site_MapDraw, addr::MapDraw, (void*)&Hook_MapDraw);
+    Log("map background cache: %s\n", ok ? "ok" : "FAILED");
+}
+
 static void PatchCheats()
 {
     bool ok = PatchCallRel32(addr::Site_CheatMatch, addr::CheatMatch, (void*)&Hook_CheatMatch);
@@ -2279,7 +2374,6 @@ static void PatchHDResolution()
 // ---------------------------------------------------------------------------
 static DWORD g_mainThreadId = 0;
 
-static bool IsGameCode(uint32_t a) { return a >= 0x401000 && a < 0xAE8000; }
 
 // First plausible game return address on a stack (preceded by a call instruction).
 static uint32_t FindGameReturn(uint32_t esp)
@@ -2415,6 +2509,11 @@ static void Init()
     for (uintptr_t site : addr::Site_ObjProject)
         projOk += PatchCallRel32(site, addr::ObjProject, (void*)&Hook_ObjProject) ? 1 : 0;
     Log("object projection hooks installed: %d/3\n", projOk);
+    {
+        char ini[MAX_PATH];
+        sprintf_s(ini, "%s\\" MOD_NAME ".ini", g_dir);
+        if (GetPrivateProfileIntA(MOD_NAME, "Optimizations", 1, ini)) PatchMapCache();
+    }
     Log("hooks installed\n");
 }
 
