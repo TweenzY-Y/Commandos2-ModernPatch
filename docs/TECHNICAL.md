@@ -85,6 +85,26 @@ Video mode index at options (`0xBCBADC`) `+0x54`; sizes come from switch tables 
 — its draw (`0x7aaec0`) and the menu layout (`0x7ae010`) already centre a 640×480 menu
 on larger screens.
 
+### Game bug: crash when zooming at high resolutions
+
+With a zoom other than 1.0 the map background is drawn by the scaled blitters
+`0x856880` / `0x856ea0` (called from `0x857570` at `0x857851` / `0x85788f`; zoom 1.0
+uses `0x854440`). They split the source area into 64×64 tiles and keep one entry per
+tile column/row in fixed stack arrays: 24 columns (`esp+0x64`, 12-byte entries) and 22
+rows (`esp+0x188`, 16-byte entries). At 1920×1080 a zoomed view spans ~28 columns, the
+array overflows and the game crashes (also without the rest of the patch; 1280×720 stays
+below the limit). The patch hooks both call sites and splits large blits into rectangles
+of at most 16 tiles per side:
+
+```
+bool Blit(uint16_t* dst, int pitchPx, float srcX, float srcY, int w, int h, uint32_t extra)
+```
+
+(thiscall, `ret 0x1c`; `this+0x30` = source pixels per screen pixel, `this+0x20` =
+source pixels per world unit; note that the function pushes `ecx` early, so its own
+`[esp+...]` argument references are shifted by 4). This fix is applied whenever the
+build check passes, independent of `Enabled`.
+
 ## Full-screen pause menu
 
 The pause menu is told the screen is 640×480 (`GetScreenSize` `0x8ed510` at `0x7aaee8`
@@ -99,9 +119,13 @@ real mouse position (`0x793199`, `0x791138`). `GetCursorPos` for logic (`0x8e156
 menu space; the arrow poll `0x402e41` is not, because the game also draws the arrow
 immediately on mouse moves (`0x81ea20` → `0x81e830`).
 
-## Diagnostics (`Debug=2`)
+## Diagnostics
 
-Heap scan for RTTI objects, per-extra-frame memory diffs with owner attribution,
-automatic captures in menus/inventory and hardware watchpoints (DR0–DR3 via
+Always on: a vectored exception handler logs access violations inside the game code
+(address, registers and the last map-background blits) to `Commandos2-ModernPatch.log`
+before the game terminates.
+
+`Debug=2`: heap scan for RTTI objects, per-extra-frame memory diffs with owner
+attribution, automatic captures in menus/inventory and hardware watchpoints (DR0–DR3 via
 `SetThreadContext` + vectored exception handler) logging the writing instruction and
-the call stack to `Commandos2-ModernPatch.log`.
+the call stack.

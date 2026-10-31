@@ -14,7 +14,7 @@
 // F11 object smoothing. See README.md and docs/TECHNICAL.md.
 
 #define MOD_NAME "Commandos2-ModernPatch"   // ini/log/folder name in the game directory
-#define MOD_VERSION "1.0.0"
+#define MOD_VERSION "1.0.1"
 
 #include <windows.h>
 #include <mmsystem.h>
@@ -530,8 +530,10 @@ static void __fastcall Hook_Update(void* self, void* edx)
 static void DrawFrameExtra(uintptr_t juego, uintptr_t wm, float alpha);
 
 // The game's frame (draw + built-in frame limiter).
+static void NoteFrameSurface(void* canvas);
 static void __fastcall Hook_Frame(void* self, void* edx, void* canvas)
 {
+    NoteFrameSurface(canvas);
     if (!g_inGame && !g_inMenu) { Game_Frame(self, edx, canvas); PauseComposite(canvas); return; }
     uintptr_t juego = (uintptr_t)self;
     uint8_t limited = At<uint8_t>(juego, addr::J_FpsLimited);
@@ -1131,6 +1133,7 @@ static void DrawFrameExtra(uintptr_t juego, uintptr_t wm, float alpha)
     At<uint32_t>(wm, addr::WM_Canvas) = 0;
     if (Game_CanvasInit(canvas, nullptr, (void*)(wm + addr::WM_SurfInfo)) != 0) return;
     Game_VideoLock(video, nullptr, lockInfo);
+    NoteFrameSurface(canvas);
 
     uint8_t limited = At<uint8_t>(juego, addr::J_FpsLimited);
     At<uint8_t>(juego, addr::J_FpsLimited) = 0;
@@ -1718,6 +1721,140 @@ static void PatchScaledPause()
     Log("scaled pause menu hooks: %s\n", ok ? "ok" : "FAILED");
 }
 
+// ---------------------------------------------------------------------------
+// Game bug at high resolutions: the scaled map-background blitters 0x856880 and
+// 0x856ea0 split the source area into 64x64 tiles and store one entry per tile
+// column / row in fixed stack arrays (24 columns at esp+0x64, 22 rows at
+// esp+0x188). A large screen (e.g. 1920x1080) combined with zoom needs more
+// tiles than that, the arrays overflow and the game crashes. Large blits are
+// split into rectangles that each fit.
+//
+// Signature (thiscall, ret 0x1c; the function pushes ecx early, which shifts
+// its own [esp+...] argument references by 4):
+//   bool Blit(uint16_t* dst, int pitchPx, float srcX, float srcY, int w, int h, uint32_t extra)
+// this+0x30 = source pixels per screen pixel, this+0x20 = source pixels per
+// world unit (srcX/srcY are world units). 'extra' is passed through unchanged.
+// ---------------------------------------------------------------------------
+namespace addr {
+    constexpr uintptr_t TileBlit       = 0x856880;
+    constexpr uintptr_t TileBlitBlend  = 0x856ea0;
+    constexpr uintptr_t Site_TileBlit      = 0x857851;
+    constexpr uintptr_t Site_TileBlitBlend = 0x85788f;
+}
+typedef uint32_t(__fastcall* PFN_TileBlit)(void* self, void* edx, uint16_t* dst, int pitch,
+    float srcX, float srcY, int w, int h, uint32_t extra);
+
+static uint32_t SplitTileBlit(PFN_TileBlit orig, void* self, uint16_t* dst, int pitch,
+    float srcX, float srcY, int w, int h, uint32_t extra)
+{
+    const float step = *(float*)((uintptr_t)self + 0x30);   // source px per screen px
+    const float pxPerUnit = *(float*)((uintptr_t)self + 0x20);
+    const float maxSrc = 64.0f * 16;                         // keep each call well within the arrays
+    int chunk = (step > 0) ? (int)(maxSrc / step) : w;
+    if (chunk < 16) chunk = 16;
+    // Anything that does not look like a sane screen rectangle goes to the game unchanged.
+    if ((w <= chunk && h <= chunk) || pxPerUnit <= 0 || w <= 0 || h <= 0 || w > 8192 || h > 8192)
+        return orig(self, nullptr, dst, pitch, srcX, srcY, w, h, extra);
+
+    const float unitsPerScreenPx = step / pxPerUnit;
+    uint32_t result = 0;
+    for (int y = 0; y < h; y += chunk) {
+        int ch = (h - y < chunk) ? h - y : chunk;
+        for (int x = 0; x < w; x += chunk) {
+            int cw = (w - x < chunk) ? w - x : chunk;
+            result |= orig(self, nullptr, dst + (size_t)y * pitch + x, pitch,
+                           srcX + x * unitsPerScreenPx, srcY + y * unitsPerScreenPx, cw, ch, extra) & 0xFF;
+        }
+    }
+    return result;
+}
+
+// ---- crash forensics: ring buffer of recent blits + access-violation logger ----
+struct BlitRec {
+    uint32_t fn, self, dst, pitch, flags; float srcX, srcY; int w, h;
+    float step, ppu, f2c; int f48, f4c, f50, f54, f64, f68, f6c;
+    uint32_t surfBase; int surfPitch, surfW, surfH; uint32_t tick;
+};
+static BlitRec g_blitRing[64];
+static volatile LONG g_blitRingPos = 0;
+static uint32_t g_surfBase = 0;
+static int g_surfPitch = 0, g_surfW = 0, g_surfH = 0;
+
+static void RecordBlit(uint32_t fn, void* self, uint16_t* dst, int pitch, float srcX, float srcY, int w, int h, uint32_t flags)
+{
+    BlitRec& r = g_blitRing[InterlockedIncrement(&g_blitRingPos) & 63];
+    uintptr_t s = (uintptr_t)self;
+    r = { fn, (uint32_t)s, (uint32_t)(uintptr_t)dst, (uint32_t)pitch, (uint32_t)flags, srcX, srcY, w, h,
+          At<float>(s, 0x30), At<float>(s, 0x20), At<float>(s, 0x2c),
+          At<int>(s, 0x48), At<int>(s, 0x4c), At<int>(s, 0x50), At<int>(s, 0x54),
+          At<int>(s, 0x64), At<int>(s, 0x68), At<int>(s, 0x6c),
+          g_surfBase, g_surfPitch, g_surfW, g_surfH, g_tick };
+}
+
+static LONG CALLBACK CrashVeh(EXCEPTION_POINTERS* e)
+{
+    static LONG done = 0;
+    if (e->ExceptionRecord->ExceptionCode != EXCEPTION_ACCESS_VIOLATION) return EXCEPTION_CONTINUE_SEARCH;
+    uint32_t eip = (uint32_t)e->ContextRecord->Eip;
+    if (eip < 0x401000 || eip >= 0xAE8000) return EXCEPTION_CONTINUE_SEARCH;   // only the game's own code
+    if (InterlockedIncrement(&done) > 3) return EXCEPTION_CONTINUE_SEARCH;
+    CONTEXT* c = e->ContextRecord;
+    Log("\n*** CRASH: access violation at %08X (%s %08X) ***\n", eip,
+        e->ExceptionRecord->ExceptionInformation[0] ? "write" : "read",
+        (unsigned)e->ExceptionRecord->ExceptionInformation[1]);
+    Log("eax=%08X ebx=%08X ecx=%08X edx=%08X esi=%08X edi=%08X ebp=%08X esp=%08X\n",
+        (unsigned)c->Eax, (unsigned)c->Ebx, (unsigned)c->Ecx, (unsigned)c->Edx, (unsigned)c->Esi,
+        (unsigned)c->Edi, (unsigned)c->Ebp, (unsigned)c->Esp);
+    LONG pos = g_blitRingPos;
+    for (int i = 15; i >= 0; i--) {
+        const BlitRec& r = g_blitRing[(pos - i) & 63];
+        if (!r.fn) continue;
+        long long off = (long long)r.dst - r.surfBase;
+        int row = r.surfPitch ? (int)(off / 2 / r.surfPitch) : 0, col = r.surfPitch ? (int)(off / 2 % r.surfPitch) : 0;
+        Log("  blit[-%d] fn=%06X tick=%u self=%08X dst=%08X (row %d col %d of %dx%d pitch %d) pitch=%d extra=%08X "
+            "src=(%.2f %.2f) wh=%dx%d step=%.4f ppu=%.4f f2c=%.4f b=(%d %d %d %d) map=(%d %d %d)\n",
+            i, r.fn, r.tick, r.self, r.dst, row, col, r.surfW, r.surfH, r.surfPitch, (int)r.pitch, r.flags,
+            r.srcX, r.srcY, r.w, r.h, r.step, r.ppu, r.f2c, r.f48, r.f4c, r.f50, r.f54, r.f64, r.f68, r.f6c);
+    }
+    return EXCEPTION_CONTINUE_SEARCH;
+}
+
+// Called with the frame canvas before the game draws: remember the screen surface.
+static void NoteFrameSurface(void* canvas)
+{
+    if (!canvas) return;
+    uintptr_t surf = *(uintptr_t*)canvas;
+    if (!surf) return;
+    __try {
+        g_surfBase = At<uint32_t>(surf, 4);
+        g_surfPitch = At<int>(surf, 8) / 2;
+        g_surfW = At<int>(surf, 0x10);
+        g_surfH = At<int>(surf, 0x14);
+    }
+    __except (EXCEPTION_EXECUTE_HANDLER) {}
+}
+
+static uint32_t __fastcall Hook_TileBlit(void* self, void* edx, uint16_t* dst, int pitch,
+    float srcX, float srcY, int w, int h, uint32_t extra)
+{
+    RecordBlit(0x856880, self, dst, pitch, srcX, srcY, w, h, extra);
+    return SplitTileBlit((PFN_TileBlit)addr::TileBlit, self, dst, pitch, srcX, srcY, w, h, extra);
+}
+static uint32_t __fastcall Hook_TileBlitBlend(void* self, void* edx, uint16_t* dst, int pitch,
+    float srcX, float srcY, int w, int h, uint32_t extra)
+{
+    RecordBlit(0x856ea0, self, dst, pitch, srcX, srcY, w, h, extra);
+    return SplitTileBlit((PFN_TileBlit)addr::TileBlitBlend, self, dst, pitch, srcX, srcY, w, h, extra);
+}
+
+static void PatchTileBlitOverflow()
+{
+    bool ok = PatchCallRel32(addr::Site_TileBlit, addr::TileBlit, (void*)&Hook_TileBlit);
+    ok &= PatchCallRel32(addr::Site_TileBlitBlend, addr::TileBlitBlend, (void*)&Hook_TileBlitBlend);
+    Log("map background tile-array overflow fix: %s\n", ok ? "ok" : "FAILED");
+    AddVectoredExceptionHandler(0, CrashVeh);   // last in line: logs crashes in game code
+}
+
 static void PatchHDMenus()
 {
     struct { uintptr_t site; uintptr_t from; uintptr_t to; } sites[] = {
@@ -1782,6 +1919,7 @@ static void Init()
         return;
     }
     PatchHDResolution();
+    PatchTileBlitOverflow();   // game bug fix, needed for resolutions above 1280x720
     if (g_cfg.hdMenus) PatchHDMenus();
     if (g_cfg.hdMenus && g_cfg.pauseScale) PatchScaledPause();
     // Load the DirectDraw backend now, so cnc-ddraw can install its input
