@@ -14,7 +14,7 @@
 // F11 object smoothing. See README.md and docs/TECHNICAL.md.
 
 #define MOD_NAME "Commandos2-ModernPatch"   // ini/log/folder name in the game directory
-#define MOD_VERSION "1.1.1"
+#define MOD_VERSION "1.1.2"
 
 #include <windows.h>
 #include <mmsystem.h>
