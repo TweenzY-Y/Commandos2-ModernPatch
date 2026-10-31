@@ -14,7 +14,7 @@
 // F11 object smoothing. See README.md and docs/TECHNICAL.md.
 
 #define MOD_NAME "Commandos2-ModernPatch"   // ini/log/folder name in the game directory
-#define MOD_VERSION "1.1.3"
+#define MOD_VERSION "1.1.4"
 
 #include <windows.h>
 #include <mmsystem.h>
@@ -298,11 +298,24 @@ static uintptr_t g_lastMission = 0;
 static double g_statStart = 0.0;
 static int g_statFrames = 0, g_statTicks = 0;
 
+// Camera rotation (interiors, LAlt + middle mouse button): angle at cam+0x28 as a
+// fraction of a full turn (2^32 = 360 degrees); the projection matrix at cam+0x38
+// (see 0x7e1c60): x = c*px + s*py + T0 (+0x5C), y = r*px + q*py + r3z*pz + T1 (+0x60)
+// with c,s = +0x38/+0x3C, row 2 = (s*kA, -c*kA) at +0x44/+0x48, row 3 = (s*kB, -c*kB)
+// at +0x50/+0x54; screen = (proj - pos) * scale (+0x70).
+struct CamRot {
+    uint32_t bam;
+    float m[6];         // +0x38 +0x3C +0x44 +0x48 +0x50 +0x54
+    float pos[2], scale, t[2];
+};
+static const int kRotOffs[6] = { 0x38, 0x3c, 0x44, 0x48, 0x50, 0x54 };
+
 struct CamState {
     uintptr_t cam;
     uint32_t tick;      // g_tick when 'cur' was captured
     float prev[3];
     float cur[3];
+    CamRot rprev, rcur;
 };
 static CamState g_cams[16];
 static int g_camCount = 0;
@@ -375,6 +388,9 @@ static float TargetFps()
 // Hooks
 // ---------------------------------------------------------------------------
 
+static volatile uint8_t g_inExtraFrame = 0;
+
+static void DumpBmp(const char* name, const uint16_t* src, int w, int h, int pitchPx, bool is555);
 // World viewer draw: render with an interpolated camera, then restore it.
 static void __fastcall Hook_VisorDraw(void* self, void* edx, void* canvas)
 {
@@ -388,14 +404,24 @@ static void __fastcall Hook_VisorDraw(void* self, void* edx, void* canvas)
     float* c = (float*)(cam + addr::CAM_X);
     float actual[3] = { At<float>(cam, addr::CAM_X), At<float>(cam, addr::CAM_Y), At<float>(cam, addr::CAM_Zoom) };
 
+    CamRot rnow;
+    rnow.bam = At<uint32_t>(cam, 0x28);
+    for (int i = 0; i < 6; i++) rnow.m[i] = At<float>(cam, kRotOffs[i]);
+    rnow.pos[0] = actual[0]; rnow.pos[1] = actual[1];
+    rnow.scale = At<float>(cam, 0x70);
+    rnow.t[0] = At<float>(cam, 0x5c); rnow.t[1] = At<float>(cam, 0x60);
+
     CamState* s = GetCamState(cam);
     if (s->tick != g_tick) {
         if (s->tick == 0xFFFFFFFF || s->tick + 1 != g_tick) {
             memcpy(s->prev, actual, sizeof(actual));  // first sight / missed ticks: no interpolation
+            s->rprev = rnow;
         } else {
             memcpy(s->prev, s->cur, sizeof(actual));
+            s->rprev = s->rcur;
         }
         memcpy(s->cur, actual, sizeof(actual));
+        s->rcur = rnow;
         s->tick = g_tick;
         // Large jumps (centering on a unit, switching views): snap.
         float dx = s->cur[0] - s->prev[0], dy = s->cur[1] - s->prev[1];
@@ -409,11 +435,54 @@ static void __fastcall Hook_VisorDraw(void* self, void* edx, void* canvas)
     At<float>(cam, addr::CAM_Y) = s->prev[1] + (s->cur[1] - s->prev[1]) * a;
     At<float>(cam, addr::CAM_Zoom) = s->prev[2] + (s->cur[2] - s->prev[2]) * a;
 
+    // Rotation between the two ticks: interpolate the angle and keep the ground point
+    // in the middle of the view in place (the game rotates around it).
+    float wantX = At<float>(cam, addr::CAM_X), wantY = At<float>(cam, addr::CAM_Y);
+    bool rotated = false;
+    const int32_t dBam = (int32_t)(s->rcur.bam - s->rprev.bam);
+    if (dBam != 0 && dBam > -0x20000000 && dBam < 0x20000000 && s->rprev.scale == s->rcur.scale &&
+        s->rcur.scale > 0 && s->prev[2] == s->cur[2]) {
+        const CamRot& p0 = s->rprev; const CamRot& p1 = s->rcur;
+        float cx = At<int>(viewer, 0x3c) * 0.5f, cy = At<int>(viewer, 0x40) * 0.5f;
+        if (!(cx > 0 && cx < 10000 && cy > 0 && cy < 10000)) { cx = 320; cy = 240; }
+        auto kOf = [](const CamRot& r, int i) { return r.m[i] * r.m[1] - r.m[i + 1] * r.m[0]; };  // s*k*s + c*k*c
+        auto pivot = [&](const CamRot& r, float* P) {
+            float c = r.m[0], sn = r.m[1], kB = kOf(r, 4);
+            float u = r.pos[0] + cx / r.scale - r.t[0];
+            float v = (r.pos[1] + cy / r.scale - r.t[1]) / (kB != 0 ? kB : 1.0f);
+            P[0] = c * u + sn * v; P[1] = sn * u - c * v;
+        };
+        float P0[2], P1[2];
+        pivot(p0, P0); pivot(p1, P1);
+        float P[2] = { P0[0] + (P1[0] - P0[0]) * a, P0[1] + (P1[1] - P0[1]) * a };
+        uint32_t bam = p0.bam + (uint32_t)(int32_t)((double)dBam * a);
+        double th = bam * (6.283185307179586 / 4294967296.0);
+        float c = (float)cos(th), sn = (float)sin(th);
+        float kA = kOf(p1, 2), kB = kOf(p1, 4);
+        float m[6] = { c, sn, sn * kA, -c * kA, sn * kB, -c * kB };
+        At<uint32_t>(cam, 0x28) = bam;
+        for (int i = 0; i < 6; i++) At<float>(cam, kRotOffs[i]) = m[i];
+        wantX = c * P[0] + sn * P[1] + p1.t[0] - cx / p1.scale;
+        wantY = kB * (sn * P[0] - c * P[1]) + p1.t[1] - cy / p1.scale;
+        At<float>(cam, addr::CAM_X) = wantX;
+        At<float>(cam, addr::CAM_Y) = wantY;
+        rotated = true;
+        // Interiors are rendered in 3D into an image (cam+0xA0) only when the camera's
+        // "changed" flag (cam+0x124) is set (world draw 0x7ea8a7), i.e. once per tick;
+        // other frames reuse the image. Re-render it with the interpolated angle.
+        At<uint8_t>(cam, 0x124) = 1;
+    }
+
     Game_VisorDraw(self, edx, canvas);
 
+    if (rotated) {
+        At<uint8_t>(cam, 0x124) = 1;   // next draw (the tick frame) re-renders with the real angle
+        At<uint32_t>(cam, 0x28) = rnow.bam;
+        for (int i = 0; i < 6; i++) At<float>(cam, kRotOffs[i]) = rnow.m[i];
+    }
     // Restore unless the draw itself changed the camera (then keep the game's value).
-    if (At<float>(cam, addr::CAM_X) == s->prev[0] + (s->cur[0] - s->prev[0]) * a) At<float>(cam, addr::CAM_X) = actual[0];
-    if (At<float>(cam, addr::CAM_Y) == s->prev[1] + (s->cur[1] - s->prev[1]) * a) At<float>(cam, addr::CAM_Y) = actual[1];
+    if (At<float>(cam, addr::CAM_X) == wantX) At<float>(cam, addr::CAM_X) = actual[0];
+    if (At<float>(cam, addr::CAM_Y) == wantY) At<float>(cam, addr::CAM_Y) = actual[1];
     if (At<float>(cam, addr::CAM_Zoom) == s->prev[2] + (s->cur[2] - s->prev[2]) * a) At<float>(cam, addr::CAM_Zoom) = actual[2];
     (void)c;
 }
@@ -576,7 +645,6 @@ static void __fastcall Hook_Frame(void* self, void* edx, void* canvas)
 #include <map>
 #include <algorithm>
 
-static volatile uint8_t g_inExtraFrame = 0;
 
 namespace diag {
     // ---- hardware watchpoints -------------------------------------------
@@ -1233,7 +1301,11 @@ static void __fastcall Hook_EndIter(void* canvas, void* edx)
             // The arrow's screen position is normally polled once per tick
             // (CJuego::Update -> 0x402e00: GetCursorPos -> cursor sprite). Poll it
             // for every frame; it only moves the cursor sprite, not logic state.
-            ((void(*)())addr::PollCursorPos)();
+            // Not while the middle button is held: rotating the view (Alt + middle
+            // button in interiors) uses the mouse movement since the cursor's last
+            // position, which these polls would consume.
+            if (!(GetAsyncKeyState(VK_MBUTTON) & 0x8000))
+                ((void(*)())addr::PollCursorPos)();
 
             // Inventory: draw the dragged item where the cursor is now. The item
             // itself is drawn by the manager's draw (0x8a00b0) at mgr+0x58/+0x5C,
@@ -2231,7 +2303,7 @@ struct BgCache {
     uintptr_t cam = 0;
     uint32_t tick = 0xFFFFFFFF;
     bool valid = false;
-    uint32_t key[16] = {};
+    uint32_t key[20] = {};
     int x = 0, y = 0, w = 0, h = 0;
     std::vector<uint16_t> px;
 };
@@ -2245,6 +2317,7 @@ static int BgKey(uintptr_t cam, const int32_t* cv, uintptr_t surf, uintptr_t ctx
     k[n++] = At<uint32_t>(cam, 0x30); k[n++] = At<uint32_t>(cam, 0x34);
     k[n++] = At<uint32_t>(cam, 0x94); k[n++] = At<uint32_t>(cam, 0x98);
     k[n++] = At<uint32_t>(cam, 0x90);
+    k[n++] = At<uint32_t>(cam, 0x28);   // rotation angle
     for (int i = 1; i < 5; i++) k[n++] = (uint32_t)cv[i];
     k[n++] = At<uint32_t>(surf, 8);
     k[n++] = ctx ? At<uint32_t>(ctx, 0x18) : 0;
@@ -2274,7 +2347,7 @@ static void __fastcall Hook_MapDraw(void* self, void* edx, void* canvas, void* c
     for (auto& e : g_bg) if (e.cam == cam) { c = &e; break; }
     if (!c) { static int rr = 0; c = &g_bg[rr++ & 3]; c->cam = cam; c->valid = false; }
 
-    uint32_t key[16];
+    uint32_t key[20];
     int nk = BgKey(cam, cv, surf, (uintptr_t)ctx, key);
     const int w = x1 - x0, h = y1 - y0;
     if (g_inExtraFrame && c->valid && c->tick == g_tick && memcmp(key, c->key, nk * 4) == 0 &&

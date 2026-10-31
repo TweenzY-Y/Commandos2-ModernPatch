@@ -56,6 +56,17 @@ surface info (`+0xE8`).
   cones; visuals array `+0x8C`, count `+0x90`) or drawn at several positions within one
   tick are not interpolated. Jumps over 150 units snap.
 
+- **Rotation** (interiors, Alt + middle mouse button) — angle at `cam+0x28` (2^32 = one
+  turn) and the projection matrix at `cam+0x38` (see `0x7e1c60`: `x = c*px + s*py + T0`,
+  `y = s*kB*px - c*kB*py + ... + T1`, rows at `+0x38/+0x3C`, `+0x44/+0x48`,
+  `+0x50/+0x54`, translation `+0x5C/+0x60`; screen = (proj - pos) * `+0x70`). The angle
+  is interpolated, the matrix rebuilt, and the position chosen so the ground point in the
+  middle of the view stays in place (the game rotates around it). Interiors are rendered
+  in 3D into an image (`cam+0xA0`) only when the camera's changed flag `cam+0x124` is set
+  (world draw `0x7ea8a7`), once per tick; during a rotation the flag is set for extra
+  frames so the room is rendered with the interpolated angle. While the middle button is
+  held the cursor is not polled in extra frames (the rotation uses the cursor movement).
+
 ## Per-draw animations (must not advance in extra frames)
 
 Found with heap diffs and hardware write watchpoints (`Debug=2`):
