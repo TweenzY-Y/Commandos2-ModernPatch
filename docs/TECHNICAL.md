@@ -188,3 +188,13 @@ keeps a copy of what the tick frame drew (per camera, canvas clip rectangle) and
 extra frames whose camera state (position, zoom, view size, flags) and canvas are
 identical, copies it back instead of drawing again. While the camera moves everything
 is drawn normally. Part of `Optimizations=1`.
+
+### Game bug: quick clicks ignored in the inventory
+
+The game detects double clicks itself (`0x7967b0`): a left click within the Windows
+double-click time and 5 pixels of the previous one becomes event `0x208` instead of
+`0x202`. The inventory grid (`CVentanaCuadriculaInv`, handler `0x930790`) only reacts to
+`0x202`, so quickly picking up and dropping an item in the same place did nothing. Its
+switch maps `event - 0x201` through the byte table at `0x93092C`; the patch sends `0x208`
+to the `0x202` case, as the game already does for `0x20A`/`0x204`. Applied independent of
+`Enabled`.

@@ -14,7 +14,7 @@
 // F11 object smoothing. See README.md and docs/TECHNICAL.md.
 
 #define MOD_NAME "Commandos2-ModernPatch"   // ini/log/folder name in the game directory
-#define MOD_VERSION "1.1.2"
+#define MOD_VERSION "1.1.3"
 
 #include <windows.h>
 #include <mmsystem.h>
@@ -2306,6 +2306,27 @@ static void PatchMapCache()
     Log("map background cache: %s\n", ok ? "ok" : "FAILED");
 }
 
+// ---------------------------------------------------------------------------
+// Game bug: quick clicks in the inventory are ignored. The game turns a left click
+// that follows the previous one within the double-click time and 5 pixels into a
+// double-click event (0x208 instead of 0x202, see 0x7967b0). The inventory grid
+// (CVentanaCuadriculaInv, event handler 0x930790) only reacts to 0x202, so picking
+// up and dropping an item quickly in the same place does nothing. Its switch maps
+// event - 0x201 through the byte table at 0x93092C; send 0x208 to the 0x202 case
+// (as the game already does for 0x20A / 0x204).
+// ---------------------------------------------------------------------------
+static void PatchInventoryDoubleClick()
+{
+    uint8_t* p = (uint8_t*)(0x93092c + (0x208 - 0x201));
+    const uint8_t* click = (const uint8_t*)(0x93092c + (0x202 - 0x201));
+    if (*p != 3 || *click != 1) { Log("inventory double-click fix: unexpected bytes\n"); return; }
+    DWORD old;
+    VirtualProtect(p, 1, PAGE_EXECUTE_READWRITE, &old);
+    *p = 1;
+    VirtualProtect(p, 1, old, &old);
+    Log("inventory double-click fix: ok\n");
+}
+
 static void PatchCheats()
 {
     bool ok = PatchCallRel32(addr::Site_CheatMatch, addr::CheatMatch, (void*)&Hook_CheatMatch);
@@ -2474,6 +2495,7 @@ static void Init()
     PatchHDResolution();
     PatchTileBlitOverflow();   // game bug fix, needed for resolutions above 1280x720
     PatchCheats();
+    PatchInventoryDoubleClick();   // game bug fix
     {
         char ini[MAX_PATH];
         sprintf_s(ini, "%s\\" MOD_NAME ".ini", g_dir);
