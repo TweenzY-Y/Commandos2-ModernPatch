@@ -772,14 +772,15 @@ namespace diag {
                 Log("  %-50s +%03X : %d  (obj %08X)\n", ClassName(v[i].second.first), v[i].second.second, v[i].first,
                     (unsigned)example[v[i].second]);
             int n = 0;
-            for (auto& h : dataHits) if (h.second >= 20 && n++ < 100) Log("  .data %08X : %d\n", 0xB91000 + h.first, h.second);
+            for (auto& h : dataHits)
+                if (h.second >= (g_inMenu ? 2 : 20) && n++ < 100) Log("  .data %08X : %d\n", 0xB91000 + h.first, h.second);
 
             // Arm hardware write-watchpoints on the most suspicious polymorphic fields.
             int slot = 0;
             uintptr_t addrs[4] = {};
             for (size_t i = 0; i < v.size() && slot < 4; i++) {
                 int cls = v[i].second.first;
-                if (cls < 0 || v[i].first < 20) continue;
+                if (cls < 0 || v[i].first < (g_inMenu ? 2 : 20)) continue;   // menus: also rarely toggling state
                 const char* nm = g_vtNames[cls].name;
                 // Skip known per-draw bookkeeping (config tree, render caches, draw ids).
                 if (strncmp(nm, ".?AVCMsb", 8) == 0 || strstr(nm, "CManual") || strstr(nm, "Bitmap") ||
@@ -787,6 +788,17 @@ namespace diag {
                     continue;
                 addrs[slot] = example[v[i].second] + v[i].second.second;
                 Log("diag: watchpoint %d on %s +%03X (%08X)\n", slot, nm, v[i].second.second, (unsigned)addrs[slot]);
+                slot++;
+            }
+            // Globals that change in extra frames (excluding known frame statistics).
+            static const uint32_t knownGlobals[] = { 0xBD57C8, 0xBD57DC, 0xBD57E0, 0xBEDFF8, 0xBEE004, 0xC08B8C };
+            for (auto& h : dataHits) {
+                if (slot >= 4) break;
+                uint32_t a = 0xB91000 + h.first;
+                if (h.second < 2 || std::find(std::begin(knownGlobals), std::end(knownGlobals), a) != std::end(knownGlobals))
+                    continue;
+                addrs[slot] = a;
+                Log("diag: watchpoint %d on global %08X (%d frames)\n", slot, a, h.second);
                 slot++;
             }
             if (slot) ArmWatchpoints(addrs, slot);
@@ -1107,6 +1119,23 @@ static void __fastcall Hook_ObjProject(void* self, void* edx, uint32_t a1, uint3
     Game_ObjProject(self, edx, a1, a2, a3, a4);
 
     for (int i = 0; i < 3; i++) if (pos[i] == lerp[i]) pos[i] = actual[i];
+}
+
+// ---------------------------------------------------------------------------
+// Text input caret (save game name, "keyed mission", ...): the text field draw
+// at 0x87f090 does 'inc [this+0x1c]' on every call and toggles the caret
+// ([this+0x20]) every 4 calls. In extra frames the counter is pre-decremented
+// so the game's increment leaves it unchanged and the caret blinks at the
+// original rate.
+// ---------------------------------------------------------------------------
+namespace addr {
+    constexpr uintptr_t TextFieldDraw = 0x87f090;   // thiscall(field, canvas) ret 4
+    constexpr uintptr_t Sites_TextFieldDraw[] = { 0x79c057, 0x7b7ecf, 0x7ba3de, 0x7bb1f8, 0x87f19a };
+}
+static void __fastcall Hook_TextFieldDraw(void* self, void* edx, void* canvas)
+{
+    if (g_inExtraFrame) At<int>((uintptr_t)self, 0x1c) -= 1;
+    ((PFN_Void1)addr::TextFieldDraw)(self, edx, canvas);
 }
 
 static bool PatchJmp(uintptr_t at, const uint8_t* expect, size_t n, void* target)
@@ -1942,6 +1971,10 @@ static void Init()
         Log("face sequence hook installed\n");
     if (PatchCallRel32(addr::Site_CursorAnimTick, addr::CursorAnimTick, (void*)&Hook_CursorAnimTick))
         Log("cursor animation hook installed\n");
+    int caretOk = 0;
+    for (uintptr_t site : addr::Sites_TextFieldDraw)
+        caretOk += PatchCallRel32(site, addr::TextFieldDraw, (void*)&Hook_TextFieldDraw) ? 1 : 0;
+    Log("text caret hooks installed: %d/5\n", caretOk);
     int projOk = 0;
     for (uintptr_t site : addr::Site_ObjProject)
         projOk += PatchCallRel32(site, addr::ObjProject, (void*)&Hook_ObjProject) ? 1 : 0;

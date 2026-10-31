@@ -64,6 +64,10 @@ Found with heap diffs and hardware write watchpoints (`Debug=2`):
   extra frames jump to its draw-only tail `0x92a673`.
 - Animated arrow cursor: `0x437d30` → `0x51c270` (15 frames, called from the mission draw
   at `0x44bd10`) — skipped in extra frames.
+- Text input caret (save name, "keyed mission"): the text field draw `0x87f090` does
+  `inc [this+0x1C]` per call and toggles the caret (`[this+0x20]`) every 4 calls — in
+  extra frames the counter is pre-decremented (call sites `0x79c057`, `0x7b7ecf`,
+  `0x7ba3de`, `0x7bb1f8`, `0x87f19a`).
 - Briefings (`CMABriefing` `0xB1333C`): the map fly-over advances per draw — no extra
   frames on that screen.
 

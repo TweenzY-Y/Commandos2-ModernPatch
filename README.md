@@ -71,7 +71,6 @@ cnc-ddraw's own settings are in `Commandos2-ModernPatch\cnc-ddraw\ddraw.ini` (se
   only their movement across the screen is smoothed.
 - Mission briefings run in 640×480 (scaled) at the original 25 fps.
 - Menus are 640×480 artwork and are shown with black bars (4:3).
-- The text cursor of the "keyed mission" field in the main menu blinks too fast.
 - Camera and object positions are shown one logic tick (40 ms) behind; unit orders and
   game timing are not affected.
 
