@@ -1,0 +1,9 @@
+# build output
+build/
+out/
+.cache/
+
+# runtime files (if the repository is placed inside the game folder)
+/cnc-ddraw/
+*.bmp
+*.log
