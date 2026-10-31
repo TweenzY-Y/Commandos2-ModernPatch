@@ -109,6 +109,14 @@ source pixels per world unit; note that the function pushes `ecx` early, so its 
 `[esp+...]` argument references are shifted by 4). This fix is applied whenever the
 build check passes, independent of `Enabled`.
 
+### Game bug: holes in the map when zoomed out
+
+The map tile cache is set up at `0x858730`: (screen tiles + 1) × zoom-out factor
+columns and rows, with the columns capped at 24 (`mov eax, 0x18` at `0x8587ce`, matching
+the blitter arrays above). Zoomed out at 1920×1080 about 62 columns are visible; tiles
+outside the cache are skipped by the blitter (tile state `!= 2`), leaving holes that show
+old frame contents. Since large blits are split, the cap is raised to 96 columns.
+
 ## Full-screen pause menu
 
 The pause menu is told the screen is 640×480 (`GetScreenSize` `0x8ed510` at `0x7aaee8`

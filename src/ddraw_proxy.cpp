@@ -14,7 +14,7 @@
 // F11 object smoothing. See README.md and docs/TECHNICAL.md.
 
 #define MOD_NAME "Commandos2-ModernPatch"   // ini/log/folder name in the game directory
-#define MOD_VERSION "1.0.1"
+#define MOD_VERSION "1.0.2"
 
 #include <windows.h>
 #include <mmsystem.h>
@@ -1769,6 +1769,7 @@ namespace addr {
     constexpr uintptr_t TileBlitBlend  = 0x856ea0;
     constexpr uintptr_t Site_TileBlit      = 0x857851;
     constexpr uintptr_t Site_TileBlitBlend = 0x85788f;
+    constexpr uintptr_t TileCacheColCap    = 0x8587ce;
 }
 typedef uint32_t(__fastcall* PFN_TileBlit)(void* self, void* edx, uint16_t* dst, int pitch,
     float srcX, float srcY, int w, int h, uint32_t extra);
@@ -1881,6 +1882,12 @@ static void PatchTileBlitOverflow()
     bool ok = PatchCallRel32(addr::Site_TileBlit, addr::TileBlit, (void*)&Hook_TileBlit);
     ok &= PatchCallRel32(addr::Site_TileBlitBlend, addr::TileBlitBlend, (void*)&Hook_TileBlitBlend);
     Log("map background tile-array overflow fix: %s\n", ok ? "ok" : "FAILED");
+    // The map tile cache (set up at 0x858730) holds (screen tiles + 1) * zoom-out
+    // factor columns, capped at 24 (mov eax, 0x18 at 0x8587ce) to match the blitter
+    // arrays above. Zoomed out at 1920x1080 about 62 columns are visible, so tiles
+    // outside the cache are skipped and leave holes (old frame contents) in the
+    // map. With the blits split, the cap can go: allow 96 columns (rows are not capped).
+    PatchImm32(addr::TileCacheColCap, 0xB8, 0x18, 96);
     AddVectoredExceptionHandler(0, CrashVeh);   // last in line: logs crashes in game code
 }
 
