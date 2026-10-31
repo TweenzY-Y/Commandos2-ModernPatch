@@ -157,3 +157,24 @@ event.
 `GetPrivateProfile*` does not understand a UTF-8 byte order mark: the section header
 would not match and every setting would silently fall back to its default. A BOM is
 stripped from the ini at startup.
+
+## Performance: water rendering
+
+Water (`CBitmapAgua`, vtable `0xB1B508`) is drawn by a software polygon rasterizer
+(`0x834000`–`0x83b000`) every frame, so with extra frames its cost scales with the frame
+rate. Two hot functions are replaced (`Optimizations=1`, default):
+
+- `0x839840` — texture coordinates at a polygon edge for a scanline (x87 code with a
+  manual float-to-int truncation) — SSE version.
+- `0x83a2d0` — the water span renderer for one run of the water mask on a screen row
+  (256×256 8-bit texture through a 16-bit palette); the original keeps its pixel loop
+  state in global variables. Literal C translation with the loop in registers.
+
+Both are compared with the originals on random inputs at startup and only applied if
+the results are identical.
+
+## Profiler
+
+`Profile=1` (development only) starts a thread that samples the main thread's EIP about
+every millisecond and logs the hottest game code addresses (16-byte buckets) and, for
+samples outside the game, the nearest game return address, every 10 seconds.

@@ -22,6 +22,7 @@
 #include <stdint.h>
 #include <math.h>
 #include <ctype.h>
+#include <xmmintrin.h>
 #include <string>
 
 #pragma comment(lib, "winmm.lib")
@@ -111,14 +112,16 @@ static void LoadConfig()
     // GetPrivateProfile* does not understand a UTF-8 byte order mark (added by some
     // editors): the section header would not match and every setting would fall
     // back to its default. Strip it.
-    if (FILE* f = fopen(ini, "rb")) {
+    FILE* f = nullptr;
+    if (fopen_s(&f, ini, "rb") == 0 && f) {
         std::string data;
         char buf[4096];
         size_t n;
         while ((n = fread(buf, 1, sizeof(buf), f)) > 0) data.append(buf, n);
         fclose(f);
         if (data.size() >= 3 && (uint8_t)data[0] == 0xEF && (uint8_t)data[1] == 0xBB && (uint8_t)data[2] == 0xBF) {
-            if (FILE* w = fopen(ini, "wb")) { fwrite(data.data() + 3, 1, data.size() - 3, w); fclose(w); }
+            FILE* w = nullptr;
+            if (fopen_s(&w, ini, "wb") == 0 && w) { fwrite(data.data() + 3, 1, data.size() - 3, w); fclose(w); }
         }
     }
     if (GetFileAttributesA(ini) == INVALID_FILE_ATTRIBUTES) {
@@ -1938,6 +1941,276 @@ static bool __fastcall Hook_CheatInput(void* self, void* edx, void* msg)
     return ((PFN_CheatInput)addr::CheatInput)(self, edx, msg);
 }
 
+// ---------------------------------------------------------------------------
+// Performance: textured polygon rasterizer (water). For every polygon edge on
+// every scanline, 0x839840 evaluates the texture coordinates at the edge from
+// scratch with x87 code and a slow manual float->int truncation. Equivalent
+// SSE version (thiscall, 3 args, ret 0xC):
+//   void EdgeUV(uint32_t y, int32_t* u, int32_t* v)
+//   word [this+0x46] = y
+//   edge = (byte [this+0x48] && [this+8]->y <= y) ? second edge : first edge
+//   [this+0x24] = (y - edge.y) * slopeU + edge.u     (slopes +0x14/+0x18 or +0x1C/+0x20)
+//   [this+0x28] = (y - edge.y) * slopeV + edge.v
+//   *u = trunc(float([this+0x24] * 65536)), *v = trunc(float([this+0x28] * 65536))
+// Edge record: +4 y, +8 u, +0xC v (floats).
+// ---------------------------------------------------------------------------
+namespace addr {
+    constexpr uintptr_t RastEdgeUV = 0x839840;
+}
+static inline int32_t TruncLow32(float f)
+{
+    // x87 fistp to a 64-bit integer, low 32 bits kept
+    if (f > -2147483648.0f && f < 2147483648.0f) return _mm_cvtt_ss2si(_mm_set_ss(f));
+    return (int32_t)(int64_t)f;
+}
+static void __fastcall Fast_RastEdgeUV(uint8_t* self, void*, uint32_t y, int32_t* outU, int32_t* outV)
+{
+    *(uint16_t*)(self + 0x46) = (uint16_t)y;
+    const float fy = (float)(double)y;
+    const float* e = *(const float**)(self + 8);
+    float su, sv;
+    if (self[0x48] && e[1] <= fy) {
+        su = *(float*)(self + 0x1c); sv = *(float*)(self + 0x20);
+    } else {
+        e = *(const float**)(self + 0);
+        su = *(float*)(self + 0x14); sv = *(float*)(self + 0x18);
+    }
+    const double d = (double)fy - e[1];
+    const float u = (float)(d * su + e[2]);
+    const float v = (float)(d * sv + e[3]);
+    *(float*)(self + 0x24) = u;
+    *(float*)(self + 0x28) = v;
+    *outU = TruncLow32((float)((double)u * 65536.0));
+    *outV = TruncLow32((float)((double)v * 65536.0));
+}
+
+// Water span renderer 0x83a2d0 (thiscall, 7 args, ret 0x1C): draws the part of
+// one screen row that lies inside a run of the water mask, textured from a 256x256
+// 8-bit texture through a 16-bit palette. Layer (this): +0x18 texture, +0x1C
+// palette, +0x44 polygons (0x4C each: +0xC du/dx, +0x10 dv/dx, 16.16), +0x50 row
+// table (span list pointer, span count), +0x54 rows, +0x58 first row, +0x5C/+0x60/
+// +0x64 cached row/count/span. Span: word poly, short x0, short x1.
+// Literal C translation of the original (same results, including its quirks),
+// with the pixel loop kept in registers instead of global variables.
+namespace addr {
+    constexpr uintptr_t WaterSpanRow = 0x83a2d0;
+}
+#pragma pack(push, 1)
+struct WaterSpan { uint16_t poly; int16_t x0, x1; };
+#pragma pack(pop)
+
+static void __fastcall Fast_WaterSpanRow(uint8_t* L, void*, uint32_t y, uint32_t step, uint32_t runLen,
+    uint32_t xBase, uint32_t* count, uint32_t* xpos, uint16_t** pdst)
+{
+    const uint32_t y0 = *(uint32_t*)(L + 0x58);
+    if (y < y0 || y >= *(uint32_t*)(L + 0x54) + y0) return;
+    const uint32_t X = *xpos;
+    const uint32_t runLen16 = runLen << 16;
+    const int32_t xs = (int32_t)((X + xBase) >> 16);
+    const int32_t xe = (int32_t)((runLen16 + X + xBase) >> 16);
+
+    const WaterSpan* p;
+    int32_t n;
+    const WaterSpan* cp = *(const WaterSpan**)(L + 0x64);
+    if (*(uint32_t*)(L + 0x5c) == y && *(int32_t*)(L + 0x60) > 0 && cp && cp->x0 < xs) {
+        p = cp; n = *(int32_t*)(L + 0x60);
+    } else {
+        const uint32_t* rec = (const uint32_t*)(*(uintptr_t*)(L + 0x50) + (y - y0) * 8);
+        p = (const WaterSpan*)(uintptr_t)rec[0]; n = (int32_t)rec[1];
+    }
+    if (p->x0 >= xe) return;
+    if (n > 0) {
+        while (xs >= p->x1) { n--; p++; if (n <= 0) break; }
+    }
+    if (n == 0) return;
+    if (p->x0 >= xe) return;
+    *(int32_t*)(L + 0x60) = n;
+    *(const WaterSpan**)(L + 0x64) = p;
+    *(uint32_t*)(L + 0x5c) = y;
+
+    uint8_t* const polys = *(uint8_t**)(L + 0x44);
+    const uint8_t* const tex = *(const uint8_t**)(L + 0x18);
+    const uint16_t* const pal = *(const uint16_t**)(L + 0x1c);
+    uint8_t* poly = polys + p->poly * 0x4c;
+    int32_t U, V;
+    Fast_RastEdgeUV(poly, nullptr, y, &U, &V);
+    {
+        const int32_t du = *(int32_t*)(poly + 0xc), dv = *(int32_t*)(poly + 0x10);
+        U += (xs - p->x0) * du;
+        V += (xs - p->x0) * dv;
+    }
+    int32_t duStep = (int32_t)(((int64_t)*(int32_t*)(poly + 0xc) * (int32_t)step) >> 16);
+    int32_t dvStep = (int32_t)(((int64_t)*(int32_t*)(poly + 0x10) * (int32_t)step) >> 16);
+    uint16_t* dst = *pdst;
+    uint32_t pixLeft = (runLen16 - X) / step;
+    if (pixLeft > *count) pixLeft = *count;
+
+#define WATER_PIXEL(u, v) pal[tex[(((uint32_t)(u) >> 16) & 0xff) | ((((uint32_t)(v) >> 16) & 0xff) << 8)]]
+    if (pixLeft > 2) {
+        int32_t x1 = p->x1;
+        uint32_t xb = xBase + X;
+        *xpos = X + pixLeft * step;
+        for (;;) {
+            if ((xb >> 16) >= (uint32_t)x1) break;
+            uint32_t m = (((uint32_t)x1 << 16) - xb) / step;
+            if (m > pixLeft) { m = pixLeft; pixLeft = 0; }
+            else pixLeft -= m;
+            if (m != 0) {
+                *count -= m;
+                xb += m * step;
+                for (uint32_t i = 0; i < m; i++) {
+                    dst[i] = WATER_PIXEL(U, V);
+                    U += duStep; V += dvStep;
+                }
+                dst += m;
+            }
+            // next span of this row
+            if (--n <= 0) break;
+            p++;
+            *(int32_t*)(L + 0x60) = n;
+            *(const WaterSpan**)(L + 0x64) = p;
+            poly = polys + p->poly * 0x4c;
+            duStep = (int32_t)(((int64_t)*(int32_t*)(poly + 0xc) * (int32_t)step) >> 16);
+            dvStep = (int32_t)(((int64_t)*(int32_t*)(poly + 0x10) * (int32_t)step) >> 16);
+            x1 = p->x1;
+            Fast_RastEdgeUV(poly, nullptr, y, &U, &V);
+            if (pixLeft == 0) break;
+        }
+    }
+    // remaining pixels of the run with the current span's texture coordinates
+    while (*count != 0 && (*xpos >> 16) < runLen) {
+        *dst++ = WATER_PIXEL(U, V);
+        U += duStep; V += dvStep;
+        (*count)--;
+        *xpos += step;
+    }
+#undef WATER_PIXEL
+    *pdst = dst;
+}
+
+// Compares the replacement with the original on random inputs (before patching).
+static int SelfTestWaterSpanRow()
+{
+    typedef void(__fastcall* PFN)(uint8_t*, void*, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t*, uint32_t*, uint16_t**);
+    PFN orig = (PFN)addr::WaterSpanRow;
+    uint32_t seed = 777;
+    auto r32 = [&]() { seed = seed * 1664525u + 1013904223u; return seed; };
+    auto rf = [&]() { return (r32() >> 8) / 16777216.0f; };
+    std::vector<uint8_t> tex(65536);
+    std::vector<uint16_t> pal(256);
+    for (auto& t : tex) t = (uint8_t)r32();
+    for (auto& c : pal) c = (uint16_t)r32();
+    int bad = 0;
+    for (int it = 0; it < 4000; it++) {
+        // polygons with edges
+        const int NP = 8;
+        float edges[NP][2][4];
+        uint8_t polysA[NP * 0x4c], polysB[NP * 0x4c];
+        memset(polysA, 0, sizeof(polysA));
+        for (int i = 0; i < NP; i++) {
+            uint8_t* q = polysA + i * 0x4c;
+            for (int e = 0; e < 2; e++) {
+                edges[i][e][0] = 0; edges[i][e][1] = rf() * 600;
+                edges[i][e][2] = rf() * 400 - 50; edges[i][e][3] = rf() * 400 - 50;
+            }
+            *(float**)(q + 0) = edges[i][0]; *(float**)(q + 8) = edges[i][1];
+            for (int k = 0x14; k <= 0x20; k += 4) *(float*)(q + k) = rf() * 4 - 2;
+            q[0x48] = (uint8_t)(r32() & 1);
+            *(int32_t*)(q + 0xc) = (int32_t)(r32() % 0x40000) - 0x20000;
+            *(int32_t*)(q + 0x10) = (int32_t)(r32() % 0x40000) - 0x20000;
+        }
+        memcpy(polysB, polysA, sizeof(polysA));
+        // spans for 4 rows
+        WaterSpan spans[4][10];
+        uint32_t rowsA[4][2], rowsB[4][2];
+        for (int rr = 0; rr < 4; rr++) {
+            int ns = 1 + (int)(r32() % 10), x = (int)(r32() % 200);
+            for (int s = 0; s < ns; s++) {
+                int w = 1 + (int)(r32() % 80);
+                spans[rr][s] = { (uint16_t)(r32() % NP), (int16_t)x, (int16_t)(x + w) };
+                x += w + (int)(r32() % 3 == 0 ? r32() % 20 : 0);
+            }
+            rowsA[rr][0] = (uint32_t)(uintptr_t)spans[rr]; rowsA[rr][1] = (uint32_t)ns;
+        }
+        memcpy(rowsB, rowsA, sizeof(rowsA));
+        alignas(16) uint8_t LA[0x6c] = {}, LB[0x6c] = {};
+        *(const uint8_t**)(LA + 0x18) = tex.data(); *(const uint16_t**)(LA + 0x1c) = pal.data();
+        *(uint32_t*)(LA + 0x54) = 4; *(uint32_t*)(LA + 0x58) = 100;
+        *(uint32_t*)(LA + 0x5c) = 0xFFFFFFFF;
+        memcpy(LB, LA, sizeof(LA));
+        *(uint8_t**)(LA + 0x44) = polysA; *(uint8_t**)(LB + 0x44) = polysB;
+        *(uint32_t**)(LA + 0x50) = &rowsA[0][0]; *(uint32_t**)(LB + 0x50) = &rowsB[0][0];
+        // several runs on the same layer (exercises the span cache)
+        for (int run = 0; run < 4; run++) {
+            uint32_t y = 99 + r32() % 6;
+            uint32_t step = 0x4000 + r32() % 0x30000;
+            uint32_t runLen = 1 + r32() % 300;
+            uint32_t xBase = (r32() % 300) << 16;
+            uint32_t X = r32() % (runLen << 16);
+            uint32_t cnt = 1 + r32() % 400;
+            uint16_t bufA[1024], bufB[1024];
+            memset(bufA, 0xCD, sizeof(bufA)); memset(bufB, 0xCD, sizeof(bufB));
+            uint32_t cA = cnt, cB = cnt, xA = X, xB = X;
+            uint16_t* dA = bufA + 8; uint16_t* dB = bufB + 8;
+            orig(LA, nullptr, y, step, runLen, xBase, &cA, &xA, &dA);
+            Fast_WaterSpanRow(LB, nullptr, y, step, runLen, xBase, &cB, &xB, &dB);
+            bool same = cA == cB && xA == xB && (dA - bufA) == (dB - bufB) &&
+                        memcmp(bufA, bufB, sizeof(bufA)) == 0 && memcmp(polysA, polysB, sizeof(polysA)) == 0 &&
+                        memcmp(LA + 0x5c, LB + 0x5c, 4) == 0 && *(int32_t*)(LA + 0x60) == *(int32_t*)(LB + 0x60) &&
+                        (uint8_t*)*(WaterSpan**)(LA + 0x64) - (uint8_t*)spans == (uint8_t*)*(WaterSpan**)(LB + 0x64) - (uint8_t*)spans;
+            if (!same) {
+                if (bad < 5) Log("  water span mismatch it=%d run=%d: count %u/%u xpos %08X/%08X dst %d/%d\n", it, run,
+                                 cA, cB, xA, xB, (int)(dA - bufA), (int)(dB - bufB));
+                bad++;
+            }
+        }
+    }
+    return bad;
+}
+
+// Compares the replacement with the original on random inputs (before patching).
+static int SelfTestRastEdgeUV()
+{
+    typedef void(__fastcall* PFN)(uint8_t*, void*, uint32_t, int32_t*, int32_t*);
+    PFN orig = (PFN)addr::RastEdgeUV;
+    uint32_t seed = 12345;
+    auto rnd = [&]() { seed = seed * 1664525u + 1013904223u; return (seed >> 8) / 16777216.0f; };
+    int bad = 0;
+    for (int i = 0; i < 20000; i++) {
+        alignas(16) uint8_t a[0x50] = {}, b[0x50] = {};
+        float e1[4] = { 0, rnd() * 1200, rnd() * 600 - 100, rnd() * 600 - 100 };
+        float e2[4] = { 0, rnd() * 1200, rnd() * 600 - 100, rnd() * 600 - 100 };
+        *(float**)(a + 0) = e1; *(float**)(a + 8) = e2;
+        for (int k = 0x14; k <= 0x20; k += 4) *(float*)(a + k) = rnd() * 8 - 4;
+        a[0x48] = (i & 1) ? 1 : 0;
+        memcpy(b, a, sizeof(a));
+        uint32_t y = (uint32_t)(rnd() * 1300);
+        int32_t u1, v1, u2, v2;
+        orig(a, nullptr, y, &u1, &v1);
+        Fast_RastEdgeUV(b, nullptr, y, &u2, &v2);
+        if (u1 != u2 || v1 != v2 || memcmp(a, b, sizeof(a)) != 0) {
+            if (bad < 5) Log("  edge uv mismatch y=%u: %d,%d vs %d,%d\n", y, u1, v1, u2, v2);
+            bad++;
+        }
+    }
+    return bad;
+}
+
+static void PatchPerformance()
+{
+    int bad = SelfTestRastEdgeUV();
+    Log("rasterizer self-test: %d/20000 mismatches\n", bad);
+    if (bad > 20) { Log("rasterizer optimizations NOT applied\n"); return; }
+    int badSpan = SelfTestWaterSpanRow();
+    Log("water span self-test: %d/16000 mismatches\n", badSpan);
+    static const uint8_t prolog[] = { 0x83, 0xEC, 0x08, 0x8B, 0x44, 0x24, 0x0C, 0x8B, 0xD0 };
+    static const uint8_t prologSpan[] = { 0x55, 0x8B, 0xEC, 0x83, 0xEC, 0x28, 0x8B, 0x45, 0x08 };
+    bool ok = PatchJmp(addr::RastEdgeUV, prolog, sizeof(prolog), (void*)&Fast_RastEdgeUV);
+    if (badSpan == 0)
+        ok &= PatchJmp(addr::WaterSpanRow, prologSpan, sizeof(prologSpan), (void*)&Fast_WaterSpanRow);
+    Log("rasterizer optimizations: %s%s\n", ok ? "ok" : "FAILED", badSpan ? " (water spans NOT replaced)" : "");
+}
+
 static void PatchCheats()
 {
     bool ok = PatchCallRel32(addr::Site_CheatMatch, addr::CheatMatch, (void*)&Hook_CheatMatch);
@@ -1998,8 +2271,82 @@ static void PatchHDResolution()
     Log("HD video mode set to %dx%d\n", w, h);
 }
 
+// ---------------------------------------------------------------------------
+// Sampling profiler (ini: Profile=1, development only). A background thread
+// samples the main thread's EIP about every millisecond and logs the hottest
+// code addresses every 10 seconds. Samples outside the game's code are also
+// attributed to the nearest game return address on the stack.
+// ---------------------------------------------------------------------------
+static DWORD g_mainThreadId = 0;
+
+static bool IsGameCode(uint32_t a) { return a >= 0x401000 && a < 0xAE8000; }
+
+// First plausible game return address on a stack (preceded by a call instruction).
+static uint32_t FindGameReturn(uint32_t esp)
+{
+    __try {
+        const uint32_t* sp = (const uint32_t*)esp;
+        for (int i = 0; i < 256; i++) {
+            uint32_t v = sp[i];
+            if (!IsGameCode(v)) continue;
+            const uint8_t* p = (const uint8_t*)v;
+            if (p[-5] == 0xE8 || p[-6] == 0xFF || p[-2] == 0xFF || p[-3] == 0xFF) return v;
+        }
+    } __except (EXCEPTION_EXECUTE_HANDLER) {}
+    return 0;
+}
+
+static DWORD WINAPI ProfilerThread(void*)
+{
+    HANDLE th = OpenThread(THREAD_SUSPEND_RESUME | THREAD_GET_CONTEXT, FALSE, g_mainThreadId);
+    if (!th) { Log("profiler: OpenThread failed\n"); return 0; }
+    std::unordered_map<uint32_t, uint32_t> eip, caller;
+    uint32_t total = 0, inGame = 0, inMod = 0, other = 0;
+    HMODULE self = nullptr;
+    GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                       (LPCSTR)&ProfilerThread, &self);
+    uintptr_t selfLo = (uintptr_t)self, selfHi = selfLo + 0x200000;
+    DWORD last = GetTickCount();
+    for (;;) {
+        Sleep(1);
+        if (SuspendThread(th) == (DWORD)-1) break;
+        CONTEXT c = {}; c.ContextFlags = CONTEXT_CONTROL;
+        bool ok = GetThreadContext(th, &c) != 0;
+        uint32_t ret = 0;
+        if (ok && !IsGameCode(c.Eip)) {
+            ret = FindGameReturn(c.Esp);
+        }
+        ResumeThread(th);
+        if (!ok) continue;
+        total++;
+        if (IsGameCode(c.Eip)) { inGame++; eip[c.Eip & ~0xFu]++; }
+        else {
+            if (c.Eip >= selfLo && c.Eip < selfHi) inMod++; else other++;
+            caller[ret & ~0xFu]++;
+        }
+        DWORD now = GetTickCount();
+        if (now - last >= 10000 && total) {
+            last = now;
+            Log("--- profile: %u samples, game %.1f%%, patch %.1f%%, other (DirectDraw/system) %.1f%%\n", total,
+                100.0 * inGame / total, 100.0 * inMod / total, 100.0 * other / total);
+            auto dump = [&](std::unordered_map<uint32_t, uint32_t>& m, const char* title) {
+                std::vector<std::pair<uint32_t, uint32_t>> v(m.begin(), m.end());
+                std::sort(v.begin(), v.end(), [](auto& a, auto& b) { return a.second > b.second; });
+                Log("  %s:\n", title);
+                for (size_t i = 0; i < v.size() && i < 25; i++)
+                    Log("    %08X  %5.1f%%\n", v[i].first, 100.0 * v[i].second / total);
+            };
+            dump(eip, "hottest game code (16-byte buckets)");
+            dump(caller, "outside game code, by game caller");
+            eip.clear(); caller.clear(); total = inGame = inMod = other = 0;
+        }
+    }
+    return 0;
+}
+
 static void Init()
 {
+    g_mainThreadId = GetCurrentThreadId();
     GetModuleFileNameA(nullptr, g_dir, MAX_PATH);
     char* slash = strrchr(g_dir, '\\');
     if (slash) *slash = 0;
@@ -2012,6 +2359,14 @@ static void Init()
     g_useCnc = g_cfg.cnc;
     SYSTEMTIME st; GetLocalTime(&st);
     Log("\n=== %02d:%02d:%02d ===\n", st.wHour, st.wMinute, st.wSecond);
+    {
+        char ini[MAX_PATH];
+        sprintf_s(ini, "%s\\" MOD_NAME ".ini", g_dir);
+        if (GetPrivateProfileIntA(MOD_NAME, "Profile", 0, ini)) {
+            CreateThread(nullptr, 0, ProfilerThread, nullptr, 0, nullptr);
+            Log("profiler started (main thread %u)\n", g_mainThreadId);
+        }
+    }
     Log(MOD_NAME " " MOD_VERSION " loaded. enabled=%d camera=%d objects=%d maxFps=%d hd=%dx%d\n", g_cfg.enabled, g_cfg.camera,
         g_cfg.objects, g_cfg.maxFps, g_cfg.hdW, g_cfg.hdH);
 
@@ -2025,6 +2380,11 @@ static void Init()
     PatchHDResolution();
     PatchTileBlitOverflow();   // game bug fix, needed for resolutions above 1280x720
     PatchCheats();
+    {
+        char ini[MAX_PATH];
+        sprintf_s(ini, "%s\\" MOD_NAME ".ini", g_dir);
+        if (GetPrivateProfileIntA(MOD_NAME, "Optimizations", 1, ini)) PatchPerformance();
+    }
     if (g_cfg.hdMenus) PatchHDMenus();
     if (g_cfg.hdMenus && g_cfg.pauseScale) PatchScaledPause();
     // Load the DirectDraw backend now, so cnc-ddraw can install its input
