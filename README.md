@@ -59,11 +59,20 @@ and the `Commandos2-ModernPatch` folder.
 | `HDMenus` | 1 | Pause menu in the game resolution |
 | `PauseMenuScale` | 1 | 1 = stretched to full screen, 2 = enlarged 4:3, 0 = small and centred |
 | `CncDDraw` | 1 | 1 = borderless full screen via cnc-ddraw, 0 = system DirectDraw |
+| `Cheats` | 0 | 1 = cheat keys always active (see below) |
 | `MaxFps` | 0 | Frame rate cap, 0 = monitor refresh rate |
 | `Debug` | 0 | 1 = statistics in `Commandos2-ModernPatch.log` |
 
 cnc-ddraw's own settings are in `Commandos2-ModernPatch\cnc-ddraw\ddraw.ini` (section
 `[comm2]`). **Alt+Enter** switches between full screen and a window.
+
+## Cheats
+
+The Steam version changed the cheat password from `GONZOANDJON` to `PYROFOREVER`, which
+is why the old cheats seem not to work. The patch accepts both, in any letter case: type one
+during a mission (single player), or set `Cheats=1` to skip the password. Cheat keys include
+**Ctrl+I**, **Ctrl+V**, **Shift+X** (move the selected commando to the cursor) and
+**Ctrl+Shift+N** (complete the mission).
 
 ## Known limitations
 

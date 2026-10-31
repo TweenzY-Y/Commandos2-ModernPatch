@@ -141,3 +141,19 @@ before the game terminates.
 attribution, automatic captures in menus/inventory and hardware watchpoints (DR0–DR3 via
 `SetThreadContext` + vectored exception handler) logging the writing instruction and
 the call stack.
+
+## Cheats
+
+The mission input handler `0x4a87b0` (called at `0x4477ae`) passes typed characters
+(`WM_CHAR`) to a password matcher (`0x5ca430` on `0xBCF134`, call at `0x4a8826`); on a
+match it sets `CJuego+0xEA`, which enables the cheat keys (table `0xB933A0`, 7 entries of
+0x1C bytes: modifiers, key, handler, arguments). The Steam build changed the password
+from `GONZOANDJON` (original, Legacy) to `PYROFOREVER`. The patch replaces the matcher
+to accept both in any letter case, and with `Cheats=1` sets the flag before every input
+event.
+
+## Configuration file
+
+`GetPrivateProfile*` does not understand a UTF-8 byte order mark: the section header
+would not match and every setting would silently fall back to its default. A BOM is
+stripped from the ini at startup.

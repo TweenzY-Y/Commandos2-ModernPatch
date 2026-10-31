@@ -14,13 +14,15 @@
 // F11 object smoothing. See README.md and docs/TECHNICAL.md.
 
 #define MOD_NAME "Commandos2-ModernPatch"   // ini/log/folder name in the game directory
-#define MOD_VERSION "1.0.2"
+#define MOD_VERSION "1.1.0"
 
 #include <windows.h>
 #include <mmsystem.h>
 #include <stdio.h>
 #include <stdint.h>
 #include <math.h>
+#include <ctype.h>
+#include <string>
 
 #pragma comment(lib, "winmm.lib")
 
@@ -99,12 +101,26 @@ struct Config {
     int maxFps = 0;        // 0 = monitor refresh rate
     int debug = 0;          // 1 = stats, 2 = + automatic memory diagnostics
     int toggleKey = VK_F10;
+    bool cheats = false;          // cheat keys active without typing the password
 } g_cfg;
 
 static void LoadConfig()
 {
     char ini[MAX_PATH];
     sprintf_s(ini, "%s\\" MOD_NAME ".ini", g_dir);
+    // GetPrivateProfile* does not understand a UTF-8 byte order mark (added by some
+    // editors): the section header would not match and every setting would fall
+    // back to its default. Strip it.
+    if (FILE* f = fopen(ini, "rb")) {
+        std::string data;
+        char buf[4096];
+        size_t n;
+        while ((n = fread(buf, 1, sizeof(buf), f)) > 0) data.append(buf, n);
+        fclose(f);
+        if (data.size() >= 3 && (uint8_t)data[0] == 0xEF && (uint8_t)data[1] == 0xBB && (uint8_t)data[2] == 0xBF) {
+            if (FILE* w = fopen(ini, "wb")) { fwrite(data.data() + 3, 1, data.size() - 3, w); fclose(w); }
+        }
+    }
     if (GetFileAttributesA(ini) == INVALID_FILE_ATTRIBUTES) {
         WritePrivateProfileStringA(MOD_NAME,"Enabled", "1", ini);
         WritePrivateProfileStringA(MOD_NAME,"Camera", "1", ini);
@@ -116,6 +132,7 @@ static void LoadConfig()
         WritePrivateProfileStringA(MOD_NAME,"HDMenus", "1", ini);
         WritePrivateProfileStringA(MOD_NAME,"PauseMenuScale", "1", ini);
         WritePrivateProfileStringA(MOD_NAME,"MaxFps", "0", ini);
+        WritePrivateProfileStringA(MOD_NAME,"Cheats", "0", ini);
         WritePrivateProfileStringA(MOD_NAME,"Debug", "0", ini);
     }
     g_cfg.enabled = GetPrivateProfileIntA(MOD_NAME,"Enabled", 1, ini) != 0;
@@ -132,6 +149,7 @@ static void LoadConfig()
         g_cfg.hdW > 7680 || g_cfg.hdH > 4320) { g_cfg.hdW = 1280; g_cfg.hdH = 720; }
     g_cfg.maxFps = GetPrivateProfileIntA(MOD_NAME,"MaxFps", 0, ini);
     g_cfg.debug = GetPrivateProfileIntA(MOD_NAME,"Debug", 0, ini);
+    g_cfg.cheats = GetPrivateProfileIntA(MOD_NAME,"Cheats", 0, ini) != 0;
     if (g_cfg.maxFps <= 0) {
         HDC dc = GetDC(nullptr);
         int hz = GetDeviceCaps(dc, VREFRESH);
@@ -1877,6 +1895,56 @@ static uint32_t __fastcall Hook_TileBlitBlend(void* self, void* edx, uint16_t* d
     return SplitTileBlit((PFN_TileBlit)addr::TileBlitBlend, self, dst, pitch, srcX, srcY, w, h, extra);
 }
 
+// ---------------------------------------------------------------------------
+// Cheats. The mission input handler 0x4a87b0 (called at 0x4477ae) feeds typed
+// characters (WM_CHAR) to a password matcher (0x5ca430 on 0xBCF134, at 0x4a8826);
+// on a match it sets CJuego+0xEA, which enables the cheat keys (table 0xB933A0).
+// The Steam build changed the password from GONZOANDJON (original and Legacy) to
+// PYROFOREVER. Both are accepted here, in any letter case. Cheats=1 sets the
+// flag before every input event, so no password is needed.
+// ---------------------------------------------------------------------------
+namespace addr {
+    constexpr uintptr_t Site_CheatInput = 0x4477ae;
+    constexpr uintptr_t CheatInput      = 0x4a87b0;
+    constexpr uintptr_t Site_CheatMatch = 0x4a8826;
+    constexpr uintptr_t CheatMatch      = 0x5ca430;
+    constexpr int J_CheatsOn            = 0xea;
+}
+static const char* const kCheatWords[] = { "PYROFOREVER", "GONZOANDJON" };
+static int g_cheatPos[_countof(kCheatWords)];
+
+static bool __fastcall Hook_CheatMatch(void* self, void* edx, int ch)
+{
+    char c = (char)toupper(ch & 0xFF);
+    bool hit = false;
+    for (int i = 0; i < (int)_countof(kCheatWords); i++) {
+        const char* w = kCheatWords[i];
+        int& pos = g_cheatPos[i];
+        if (w[pos] == c) pos++;
+        else pos = (w[0] == c) ? 1 : 0;
+        if (!w[pos]) { pos = 0; hit = true; }
+    }
+    if (hit) Log("cheats enabled by password\n");
+    return hit;
+}
+
+typedef bool(__fastcall* PFN_CheatInput)(void* self, void* edx, void* msg);
+static bool __fastcall Hook_CheatInput(void* self, void* edx, void* msg)
+{
+    if (g_cfg.cheats) {
+        uintptr_t juego = *(uintptr_t*)addr::G_Juego;
+        if (juego) At<uint8_t>(juego, addr::J_CheatsOn) = 1;
+    }
+    return ((PFN_CheatInput)addr::CheatInput)(self, edx, msg);
+}
+
+static void PatchCheats()
+{
+    bool ok = PatchCallRel32(addr::Site_CheatMatch, addr::CheatMatch, (void*)&Hook_CheatMatch);
+    ok &= PatchCallRel32(addr::Site_CheatInput, addr::CheatInput, (void*)&Hook_CheatInput);
+    Log("cheat hooks: %s (Cheats=%d)\n", ok ? "ok" : "FAILED", g_cfg.cheats ? 1 : 0);
+}
+
 static void PatchTileBlitOverflow()
 {
     bool ok = PatchCallRel32(addr::Site_TileBlit, addr::TileBlit, (void*)&Hook_TileBlit);
@@ -1956,6 +2024,7 @@ static void Init()
     }
     PatchHDResolution();
     PatchTileBlitOverflow();   // game bug fix, needed for resolutions above 1280x720
+    PatchCheats();
     if (g_cfg.hdMenus) PatchHDMenus();
     if (g_cfg.hdMenus && g_cfg.pauseScale) PatchScaledPause();
     // Load the DirectDraw backend now, so cnc-ddraw can install its input
