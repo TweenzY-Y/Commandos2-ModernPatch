@@ -60,6 +60,7 @@ and the `Commandos2-ModernPatch` folder.
 | `PauseMenuScale` | 1 | 1 = stretched to full screen, 2 = enlarged 4:3, 0 = small and centred |
 | `CncDDraw` | 1 | 1 = borderless full screen via cnc-ddraw, 0 = system DirectDraw |
 | `Cheats` | 0 | 1 = cheat keys always active (see below) |
+| `Optimizations` | 1 | Faster water rendering (0 = original code; not in the ini by default) |
 | `MaxFps` | 0 | Frame rate cap, 0 = monitor refresh rate |
 | `Debug` | 0 | 1 = statistics in `Commandos2-ModernPatch.log` |
 
