@@ -1,0 +1,81 @@
+name: Bug report
+description: Something does not work, looks wrong or crashes with the patch installed
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting! Please check the **Troubleshooting** section of the README first.
+        The log file `Commandos2-ModernPatch.log` (next to `Comm2.exe`) is the most useful thing you can attach.
+
+  - type: textarea
+    id: what
+    attributes:
+      label: What happens
+      description: What did you see, and what did you expect instead? Screenshots help a lot.
+    validations:
+      required: true
+
+  - type: textarea
+    id: steps
+    attributes:
+      label: How to reproduce
+      description: Mission, place and the steps that lead to the problem.
+      placeholder: |
+        1. Start mission "..."
+        2. Zoom out / open the inventory / press Esc ...
+        3. ...
+    validations:
+      required: true
+
+  - type: dropdown
+    id: without
+    attributes:
+      label: Does it also happen without the patch?
+      description: Press F10 in game to turn the patch off, or set `Enabled=0` in `Commandos2-ModernPatch.ini`.
+      options:
+        - "No, only with the patch"
+        - "Yes, also without the patch"
+        - "Not tested"
+    validations:
+      required: true
+
+  - type: input
+    id: version
+    attributes:
+      label: Patch version
+      description: Shown in the first lines of `Commandos2-ModernPatch.log`, e.g. "Commandos2-ModernPatch 1.1.8 loaded".
+    validations:
+      required: true
+
+  - type: input
+    id: display
+    attributes:
+      label: Resolution and monitor refresh rate
+      description: The game's video mode / `HDResolution`, your monitor resolution and refresh rate (e.g. 1920x1080, 144 Hz).
+    validations:
+      required: true
+
+  - type: input
+    id: system
+    attributes:
+      label: System
+      description: Windows version, graphics card and driver version.
+      placeholder: Windows 11, NVIDIA RTX 3060 (driver 560.xx)
+
+  - type: textarea
+    id: ini
+    attributes:
+      label: Changed settings
+      description: Any settings you changed in `Commandos2-ModernPatch.ini` or in `Commandos2-ModernPatch\cnc-ddraw\ddraw.ini`, and other mods or tools in use (HD Project, ReShade, dgVoodoo, overlays, recording software).
+
+  - type: textarea
+    id: log
+    attributes:
+      label: Log file
+      description: |
+        Drag `Commandos2-ModernPatch.log` here, or paste its contents. For crashes or performance problems,
+        set `Debug=1` in `Commandos2-ModernPatch.ini`, reproduce the problem, then attach the log.
+      render: text
+    validations:
+      required: true

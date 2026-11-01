@@ -84,6 +84,28 @@ during a mission (single player), or set `Cheats=1` to skip the password. Cheat 
 - Camera and object positions are shown one logic tick (40 ms) behind; unit orders and
   game timing are not affected.
 
+## Troubleshooting
+
+First look at `Commandos2-ModernPatch.log` next to `Comm2.exe`. Every start adds a section
+beginning with `=== hh:mm:ss ===` (the last one is the latest), which says whether the patch
+recognised the game and which parts were enabled.
+
+| Problem | What to try |
+|---|---|
+| Nothing changes, the log says `unexpected Comm2.exe build - hooks disabled` | The patch only works with the Steam `Comm2.exe` (see Requirements). The GOG and Legacy versions, and executables changed by other mods, are not supported. If Steam updated the game, please open an issue. |
+| No log file at all | `ddraw.dll` is not being loaded: check that it is in the same folder as `Comm2.exe`, and that you start the main version from Steam, not "Legacy". Some antivirus programs block or quarantine proxy DLLs like `ddraw.dll`. |
+| The game does not start, black screen or crash at start | Remove other DirectDraw / Direct3D wrappers from the game folder (HD Project files, ReShade `dxgi.dll` / `d3d9.dll`, dgVoodoo). Then try `CncDDraw=0`. Turn off overlays one by one (Steam, Discord, MSI Afterburner / RivaTuner, recording software). |
+| Black or flickering picture, wrong colours | In `Commandos2-ModernPatch\cnc-ddraw\ddraw.ini`, section `[comm2]`, change `renderer=auto` to `renderer=opengl`, `renderer=direct3d9` or `renderer=gdi`. Update the graphics driver. |
+| Stutter or low frame rate | Set `MaxFps` to your monitor refresh rate or lower (e.g. `MaxFps=60`). Check that the game runs on the dedicated graphics card on laptops. `Debug=1` writes frame statistics to the log. |
+| Mouse cursor is offset or clicks hit the wrong place | Make sure the Windows display scaling is not overridden for `Comm2.exe` (Properties → Compatibility → Change high DPI settings), and try without other mods. |
+| Something looks or behaves wrong only with the patch | Press **F10** to turn the patch off in game and compare. If it is only wrong with the patch, please open an issue. |
+| Crash during the game | The log contains the crash address. Please open an issue and attach it. |
+
+**Reporting a problem:** open an issue on the [Issues](../../issues) page with the
+**Bug report** form and attach `Commandos2-ModernPatch.log`. For crashes or performance
+problems set `Debug=1` first, reproduce the problem, then attach the log. Please also
+include the resolution, monitor refresh rate and graphics card.
+
 ## Building from source
 
 Requirements: Visual Studio 2019 or newer with *Desktop development with C++*.
