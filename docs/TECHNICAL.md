@@ -84,6 +84,11 @@ Found with heap diffs and hardware write watchpoints (`Debug=2`):
   `inc [this+0x1C]` per call and toggles the caret (`[this+0x20]`) every 4 calls — in
   extra frames the counter is pre-decremented (call sites `0x79c057`, `0x7b7ecf`,
   `0x7ba3de`, `0x7bb1f8`, `0x87f19a`).
+- Inventory pick-up shine (bonus books): the inventory manager's draw `0x8a00b0` advances
+  the effect (`0x92fd70`, call `0x8a01b9`: sweep offset +6 per step, then fade level -4)
+  and draws it (`0x92fe20`, call `0x8a01d3`) on every draw. The step only runs in tick
+  frames; extra frames draw an in-between frame made with the effect's frame generator
+  `0x92fbc0` (pure: returns a new image) and delete it afterwards.
 - Briefings (`CMABriefing` `0xB1333C`): the map fly-over advances per draw — no extra
   frames on that screen.
 

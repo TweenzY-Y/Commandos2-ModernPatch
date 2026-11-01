@@ -14,7 +14,7 @@
 // F11 object smoothing. See README.md and docs/TECHNICAL.md.
 
 #define MOD_NAME "Commandos2-ModernPatch"   // ini/log/folder name in the game directory
-#define MOD_VERSION "1.1.5"
+#define MOD_VERSION "1.1.6"
 
 #include <windows.h>
 #include <mmsystem.h>
@@ -660,6 +660,7 @@ static void __fastcall Hook_Frame(void* self, void* edx, void* canvas)
 #include "rtti_vtables.h"
 #include <vector>
 #include <map>
+#include <set>
 #include <algorithm>
 
 
@@ -827,6 +828,8 @@ namespace diag {
         }
         uintptr_t m = *(uintptr_t*)addr::G_Mision;
         if (m) objs.push_back({ m, -4, std::vector<uint8_t>(0x700) });
+        uintptr_t inv = *(uintptr_t*)0xBD57F0;
+        if (inv && At<uintptr_t>(inv, 0)) objs.push_back({ At<uintptr_t>(inv, 0), -5, std::vector<uint8_t>(0x1000) });
         dataSnap.resize(0x87410);
         framesLeft = 60; framesDone = 0;
         Log("diag: %u objects found, capturing\n", (unsigned)objs.size());
@@ -841,6 +844,7 @@ namespace diag {
         case -2: return "[Juego+D0 cursor]";
         case -3: return "[cursor image]";
         case -4: return "[Mision]";
+        case -5: return "[inventory manager]";
         default: return g_vtNames[c].name;
         }
     }
@@ -886,11 +890,11 @@ namespace diag {
             uintptr_t addrs[4] = {};
             for (size_t i = 0; i < v.size() && slot < 4; i++) {
                 int cls = v[i].second.first;
-                if (cls < 0 || v[i].first < (g_inMenu ? 2 : 20)) continue;   // menus: also rarely toggling state
-                const char* nm = g_vtNames[cls].name;
+                if ((cls < 0 && cls != -5) || v[i].first < (g_inMenu ? 2 : 20)) continue;   // menus: also rarely toggling state
+                const char* nm = ClassName(cls);
                 // Skip known per-draw bookkeeping (config tree, render caches, draw ids).
                 if (strncmp(nm, ".?AVCMsb", 8) == 0 || strstr(nm, "CManual") || strstr(nm, "Bitmap") ||
-                    strstr(nm, "ListaMascaras") || strstr(nm, "MascaraGrafica") || strstr(nm, "AnimCache"))
+                    strstr(nm, "ListaMascaras") || strstr(nm, "MascaraGrafica") || strstr(nm, "MascarasGraficas") || strstr(nm, "AnimCache"))
                     continue;
                 addrs[slot] = example[v[i].second] + v[i].second.second;
                 Log("diag: watchpoint %d on %s +%03X (%08X)\n", slot, nm, v[i].second.second, (unsigned)addrs[slot]);
@@ -917,7 +921,7 @@ namespace diag {
     struct Track { int lastDx, lastDy, consX, consY, changes; };
     static std::map<uint64_t, Track> track;   // key: objIndex<<20 | off<<1 | isFloat
     static int invTicks = 0, recTicks = 0;
-    static bool invDone = false;
+    static bool invDone = true;    // mouse-following recording (inventory drag research) disabled
 
     static void InvRecordTick()
     {
@@ -996,7 +1000,7 @@ namespace diag {
         uintptr_t j = *(uintptr_t*)addr::G_Juego;
         int state = j ? At<int>(j, addr::J_State) : -1;
         invTicks = (inGame && state == 7) ? invTicks + 1 : 0;
-        if (invTicks == 25 * 3 && !invDone && recTicks == 0) {
+        if (invTicks == 25 * 3 && !invDone && recTicks == 0 && framesLeft == 0) {
             MessageBeep(MB_OK);
             Start();
             framesLeft = 0;   // no extra-frame capture, tick recording instead
@@ -1027,8 +1031,21 @@ namespace diag {
         } else {
             screenTicks = 0;
         }
-        bool k = (GetAsyncKeyState(VK_F9) & 0x8000) != 0;
-        if (k && !keyPrev && framesLeft == 0 && inGame) { MessageBeep(MB_OK); Start(); }
+        // Inventory: capture from a left click (one-shot effects, e.g. picking up an item).
+        static bool lbPrev = false;
+        bool lb = (GetAsyncKeyState(VK_LBUTTON) & 0x8001) != 0;
+        if (lb && !lbPrev && framesLeft == 0 && inGame && state == 7) {
+            Log("diag: inventory click, capturing\n");
+            Start();
+            framesLeft = 750;
+        }
+        lbPrev = lb;
+        bool k = (GetAsyncKeyState(VK_F9) & 0x8001) != 0;
+        if (k && !keyPrev && framesLeft == 0 && inGame) {
+            recTicks = 0; invDone = true;      // F9 takes precedence over the inventory recording
+            MessageBeep(MB_OK); Start();
+            framesLeft = 750;                  // about 3 seconds of extra frames
+        }
         keyPrev = k;
     }
 }
@@ -1083,6 +1100,67 @@ static PFN_Void0 Game_CursorAnimTick = (PFN_Void0)addr::CursorAnimTick;
 static void __fastcall Hook_CursorAnimTick(void* self, void* edx)
 {
     if (!g_inExtraFrame) Game_CursorAnimTick(self, edx);
+}
+
+// Inventory pick-up shine (bonus books): the inventory manager's draw (0x8a00b0)
+// advances the effect (0x92fd70: next frame of the sweep, then fade-out) and draws
+// it (0x92fe20) on every draw. Advance it only in tick frames.
+namespace addr {
+    constexpr uintptr_t Site_InvEffectStep = 0x8a01b9;
+    constexpr uintptr_t InvEffectStep      = 0x92fd70;
+}
+static void* g_invEffectArg = nullptr;
+static void __fastcall Hook_InvEffectStep(void* self, void* edx, void* arg)
+{
+    if (g_inExtraFrame) return;
+    g_invEffectArg = arg;
+    ((PFN_Void1)addr::InvEffectStep)(self, edx, arg);
+}
+
+// In extra frames, draw an in-between frame of the effect instead of repeating the
+// tick's frame. Effect: +4 phase (0 sweep, 1 fade, 2 done), +8 sweep offset (+6 per
+// step), +0xC fade level (0x20, -4 per step), +0x10 current frame image. Frames are
+// made by 0x92fbc0 (thiscall(item image, offset, colour, level) -> new image, no
+// other side effects); phase 0: (offset, [0xBC19C4], -1), phase 1: (0, 0, level).
+namespace addr {
+    constexpr uintptr_t Site_InvEffectDraw = 0x8a01d3;
+    constexpr uintptr_t InvEffectDraw      = 0x92fe20;
+    constexpr uintptr_t InvEffectFrame     = 0x92fbc0;
+}
+typedef void(__fastcall* PFN_InvEffectDraw)(void* self, void* edx, void* canvas, int x, int y);
+typedef void*(__fastcall* PFN_InvEffectFrame)(void* self, void* edx, void* item, int offset, int colour, int level);
+static void __fastcall Hook_InvEffectDraw(void* self, void* edx, void* canvas, int x, int y)
+{
+    uintptr_t e = (uintptr_t)self;
+    if (!g_inExtraFrame || !g_invEffectArg || !e) {
+        ((PFN_InvEffectDraw)addr::InvEffectDraw)(self, edx, canvas, x, y);
+        return;
+    }
+    const int phase = At<int>(e, 4);
+    const float a = g_alpha;
+    void* frame = nullptr;
+    const int savedOffset = At<int>(e, 8);
+    if (phase == 0 && savedOffset >= 6) {
+        int offset = savedOffset - 6 + (int)(6.0f * a + 0.5f);
+        frame = ((PFN_InvEffectFrame)addr::InvEffectFrame)(self, nullptr, g_invEffectArg, offset,
+                                                           *(uint16_t*)0xBC19C4, -1);
+        if (frame) At<int>(e, 8) = offset + 6;
+    } else if (phase == 1 && At<int>(e, 0xc) < 0x20) {
+        int level = At<int>(e, 0xc) + 4 - (int)(4.0f * a + 0.5f);
+        if (level < 0) level = 0;
+        frame = ((PFN_InvEffectFrame)addr::InvEffectFrame)(self, nullptr, g_invEffectArg, 0, 0, level);
+    }
+    if (!frame) {
+        ((PFN_InvEffectDraw)addr::InvEffectDraw)(self, edx, canvas, x, y);
+        return;
+    }
+    void* saved = At<void*>(e, 0x10);
+    At<void*>(e, 0x10) = frame;
+    ((PFN_InvEffectDraw)addr::InvEffectDraw)(self, edx, canvas, x, y);
+    At<void*>(e, 0x10) = saved;
+    At<int>(e, 8) = savedOffset;
+    typedef void(__fastcall* PFN_Delete)(void* self, void* edx, int flags);
+    ((PFN_Delete)(**(uintptr_t**)frame))(frame, nullptr, 1);   // scalar deleting destructor
 }
 
 // ---------------------------------------------------------------------------
@@ -2613,6 +2691,10 @@ static void Init()
         Log("face sequence hook installed\n");
     if (PatchCallRel32(addr::Site_CursorAnimTick, addr::CursorAnimTick, (void*)&Hook_CursorAnimTick))
         Log("cursor animation hook installed\n");
+    if (PatchCallRel32(addr::Site_InvEffectStep, addr::InvEffectStep, (void*)&Hook_InvEffectStep))
+        Log("inventory effect hook installed\n");
+    if (PatchCallRel32(addr::Site_InvEffectDraw, addr::InvEffectDraw, (void*)&Hook_InvEffectDraw))
+        Log("inventory effect draw hook installed\n");
     int caretOk = 0;
     for (uintptr_t site : addr::Sites_TextFieldDraw)
         caretOk += PatchCallRel32(site, addr::TextFieldDraw, (void*)&Hook_TextFieldDraw) ? 1 : 0;
