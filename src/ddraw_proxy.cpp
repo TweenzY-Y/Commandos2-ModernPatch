@@ -14,7 +14,7 @@
 // F11 object smoothing. See README.md and docs/TECHNICAL.md.
 
 #define MOD_NAME "Commandos2-ModernPatch"   // ini/log/folder name in the game directory
-#define MOD_VERSION "1.1.7"
+#define MOD_VERSION "1.1.8"
 
 #include <windows.h>
 #include <mmsystem.h>
@@ -580,7 +580,22 @@ static void PauseUpdate();
 static void PauseComposite(void* canvas);
 
 // After the logic update of every loop iteration.
+// debug: frame interval statistics (ms buckets)
+static double g_lastFrameTime = 0;
+static int g_intervalHist[12];
+static void StatFrameInterval()
+{
+    double now = NowMs();
+    if (g_lastFrameTime > 0) {
+        int b = (int)((now - g_lastFrameTime) / 4.0);   // 4 ms buckets
+        if (b > 11) b = 11;
+        g_intervalHist[b]++;
+    }
+    g_lastFrameTime = now;
+}
 static void LoadScreenRestoreMode();
+static double g_nextFrameSlot = 0.0;   // time of the next frame on the steady frame clock
+static float g_tickFrameAlpha = 0.0f;  // interpolation factor of the tick's own frame
 static void __fastcall Hook_Update(void* self, void* edx)
 {
     Game_Update(self, edx);
@@ -634,6 +649,17 @@ static void __fastcall Hook_Update(void* self, void* edx)
     g_tick++;
     g_statTicks++;
     CursorPos(&g_tickMouseX, &g_tickMouseY);   // where the cursor was when logic ran
+
+    // Frame pacing: all frames (this tick's frame and the extra frames) follow one
+    // steady clock of 1000/MaxFps ms. The tick's frame waits for its slot (before the
+    // surface is locked) and is drawn with the matching interpolation factor.
+    const double frameMs = 1000.0 / g_cfg.maxFps;
+    now = NowMs();
+    if (g_nextFrameSlot < now - frameMs || g_nextFrameSlot > now + frameMs) g_nextFrameSlot = now;
+    if (g_nextFrameSlot > now) { WaitUntil(g_nextFrameSlot); now = g_nextFrameSlot; }
+    double a = (now - g_tickTime) / g_tickInterval;
+    g_tickFrameAlpha = (float)(a < 0 ? 0 : a > 1 ? 1 : a);
+    g_nextFrameSlot = now + frameMs;
 }
 
 static void DrawFrameExtra(uintptr_t juego, uintptr_t wm, float alpha);
@@ -648,13 +674,13 @@ static void __fastcall Hook_Frame(void* self, void* edx, void* canvas)
     uintptr_t juego = (uintptr_t)self;
     uint8_t limited = At<uint8_t>(juego, addr::J_FpsLimited);
     At<uint8_t>(juego, addr::J_FpsLimited) = 0;   // we do the pacing
-    g_alpha = 0.0f;
+    g_alpha = g_tickFrameAlpha;
     g_interpolating = true;
     Game_Frame(self, edx, canvas);
     PauseComposite(canvas);
     g_interpolating = false;
     At<uint8_t>(juego, addr::J_FpsLimited) = limited;
-    g_statFrames++;
+    g_statFrames++; StatFrameInterval();
 }
 
 // ---------------------------------------------------------------------------
@@ -1366,7 +1392,7 @@ static void DrawFrameExtra(uintptr_t juego, uintptr_t wm, float alpha)
     if (*(uint8_t*)addr::G_SkipPresent == 0 && *(uint8_t*)addr::G_DrewFrame != 0)
         Game_VideoPresent(video, nullptr, (void*)0);
     Game_CanvasReset(canvas, nullptr);
-    g_statFrames++;
+    g_statFrames++; StatFrameInterval();
     if (diagNow) diag::After();
 }
 
@@ -1382,14 +1408,15 @@ static void __fastcall Hook_EndIter(void* canvas, void* edx)
     double frameMs = 1000.0 / g_cfg.maxFps;
     bool canDraw = At<uint32_t>(wm, addr::WM_HaveVideo) != 0 && At<uint8_t>(wm, addr::WM_NoDraw) == 0;
 
-    double lastFrame = NowMs();
     for (;;) {
-        double now = NowMs();
-        double nextFrame = lastFrame + frameMs;
-        if (!canDraw || nextFrame + frameMs * 0.5 > deadline) break;
+        // Next slot on the steady frame clock; the slot after the deadline belongs to
+        // the next tick's frame.
+        double nextFrame = g_nextFrameSlot;
+        if (!canDraw || nextFrame + 0.5 > deadline) break;
         WaitUntil(nextFrame);
-        now = NowMs();
-        lastFrame = now;
+        double now = NowMs();
+        g_nextFrameSlot = nextFrame + frameMs;
+        if (g_nextFrameSlot < now) g_nextFrameSlot = now;   // fell behind: do not try to catch up
         float alpha = (float)((now - g_tickTime) / g_tickInterval);
         if (alpha < 0.f) alpha = 0.f;
         if (alpha > 1.f) alpha = 1.f;
@@ -1436,6 +1463,8 @@ static void __fastcall Hook_EndIter(void* canvas, void* edx)
         if (g_statStart == 0) g_statStart = now;
         if (now - g_statStart >= 5000.0) {
             double s = (now - g_statStart) / 1000.0;
+            Log("frame intervals (4 ms buckets): %d %d %d %d %d %d %d %d %d %d %d %d+\n", g_intervalHist[0], g_intervalHist[1], g_intervalHist[2], g_intervalHist[3], g_intervalHist[4], g_intervalHist[5], g_intervalHist[6], g_intervalHist[7], g_intervalHist[8], g_intervalHist[9], g_intervalHist[10], g_intervalHist[11]);
+            memset(g_intervalHist, 0, sizeof(g_intervalHist));
             Log("ticks/s %.2f  frames/s %.1f  objects tracked %u, polygon %d, shared %d\n", g_statTicks / s,
                 g_statFrames / s, (unsigned)g_objs.size(), g_statPolygon, g_statShared);
             DumpMovingTrace();

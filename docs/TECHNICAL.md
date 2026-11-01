@@ -44,6 +44,12 @@ surface info (`+0xE8`).
   (init canvas, lock, `Frame`, unlock, present) with a growing interpolation factor,
   then wait for the tick deadline.
 
+Frame clock: all frames (the tick's own frame and the extra frames) follow one steady
+clock of `1000 / MaxFps` ms. After the update the tick's frame waits for its slot (before
+the surface is locked) and is drawn with the matching interpolation factor; extra frames
+take the following slots until the next tick is due. With `Debug=1` the log contains a
+histogram of frame intervals (4 ms buckets) every 5 seconds.
+
 ## Interpolation
 
 - **Camera** — world viewer `CVentanaVisorMundo` (vtable `0xAF37C4`), `vtbl[2]` is its
