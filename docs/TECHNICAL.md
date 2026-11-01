@@ -66,6 +66,11 @@ surface info (`+0xE8`).
   (world draw `0x7ea8a7`), once per tick; during a rotation the flag is set for extra
   frames so the room is rendered with the interpolated angle. While the middle button is
   held the cursor is not polled in extra frames (the rotation uses the cursor movement).
+- **Tilt** (peeking through a door up/down) — the z column of the matrix (`+0x40/+0x4C/+0x58`)
+  and the row factors kA/kB change; they are interpolated with the angle. The view-centre
+  pivot is only used in the main view (at least half the screen wide) with a usable tilt;
+  small viewers (door peek window) interpolate the position linearly, as they turn around
+  another point.
 
 ## Per-draw animations (must not advance in extra frames)
 
