@@ -152,6 +152,21 @@ real mouse position (`0x793199`, `0x791138`). `GetCursorPos` for logic (`0x8e156
 menu space; the arrow poll `0x402e41` is not, because the game also draws the arrow
 immediately on mouse moves (`0x81ea20` → `0x81e830`).
 
+### Loading screens
+
+The mission loading screen (object `[0xBCBB14]`, begin `0x4079d0` called at `0x44c901`;
+generic "Loading, please wait" begin `0x4075c0` called at `0x44d4c5`/`0x44e076`) draws a
+fixed 640×480 layout and presents frames itself. Originally the display was 640×480
+whenever it appeared from the pause menu; with the HD pause menu, and in the mission
+(quick save / load), it appeared in a corner or small in the middle. Before it starts the
+patch switches the video mode to 640×480 with the video object's own mode change
+(`[0xC15BDC]`: `0x8ed510` get, `0x8ed530` set) — the game's SetMode `0x402a00` would also
+notify the half-loaded mission (`0x7920d0`) and crash. After the update, if the game is
+still on the same screen (quick save), the previous mode is restored; otherwise the
+briefing / mission set their resolution. `CMAJuego::Activate` (`0x7abc10`) keeps 640×480
+while a mission reload is pending (byte `+9`, reload `0x447640` at `0x7abc46`) and switches
+to the game resolution afterwards.
+
 ## Diagnostics
 
 Always on: a vectored exception handler logs access violations inside the game code

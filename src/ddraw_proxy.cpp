@@ -14,7 +14,7 @@
 // F11 object smoothing. See README.md and docs/TECHNICAL.md.
 
 #define MOD_NAME "Commandos2-ModernPatch"   // ini/log/folder name in the game directory
-#define MOD_VERSION "1.1.6"
+#define MOD_VERSION "1.1.7"
 
 #include <windows.h>
 #include <mmsystem.h>
@@ -580,9 +580,11 @@ static void PauseUpdate();
 static void PauseComposite(void* canvas);
 
 // After the logic update of every loop iteration.
+static void LoadScreenRestoreMode();
 static void __fastcall Hook_Update(void* self, void* edx)
 {
     Game_Update(self, edx);
+    LoadScreenRestoreMode();
     PauseUpdate();
 
     bool key = (GetAsyncKeyState(g_cfg.toggleKey) & 0x8000) != 0;
@@ -638,6 +640,7 @@ static void DrawFrameExtra(uintptr_t juego, uintptr_t wm, float alpha);
 
 // The game's frame (draw + built-in frame limiter).
 static void NoteFrameSurface(void* canvas);
+static void DumpBmp(const char* name, const uint16_t* src, int w, int h, int pitchPx, bool is555);
 static void __fastcall Hook_Frame(void* self, void* edx, void* canvas)
 {
     NoteFrameSurface(canvas);
@@ -2516,6 +2519,91 @@ static void PatchTileBlitOverflow()
     AddVectoredExceptionHandler(0, CrashVeh);   // last in line: logs crashes in game code
 }
 
+// CMAJuego::Activate (0x7abc10) switches the display to the game resolution
+// (0x7abc2d) and then, if a mission (re)load is pending (byte +9: restart, loading a
+// saved game), loads it (0x447640, call 0x7abc46), drawing the loading screen in a
+// fixed 640x480 layout. Originally the display was still 640x480 from the pause menu
+// at that point. Load in 640x480 and switch to the game resolution afterwards.
+// The mission loading screen (object [0xBCBB14], begin 0x4079d0, called from the
+// mission load at 0x44c901) draws a fixed 640x480 layout and presents frames itself
+// while the mission loads. Restart / load from the pause menu start it while the
+// display is still in the game resolution (originally 640x480 from the pause menu),
+// so switch the display to 640x480 first. Only the video mode itself is changed
+// (video object [0xC15BDC]: 0x8ed510 get mode, 0x8ed530 set mode; mode = {w, h,
+// bpp, flag byte}): the game's SetMode 0x402a00 would also notify the half-loaded
+// mission of the new size (0x7920d0), which crashes. The game switches to its
+// resolution normally once the mission is activated.
+static void LoadScreenMode640();
+typedef void(__fastcall* PFN_LoadScreenBegin)(void* self, void* edx, uint32_t a1, uint32_t a2, uint32_t a3);
+static void __fastcall Hook_LoadScreenBegin(void* self, void* edx, uint32_t a1, uint32_t a2, uint32_t a3)
+{
+    LoadScreenMode640();
+    ((PFN_LoadScreenBegin)0x4079d0)(self, edx, a1, a2, a3);
+}
+// Generic loading screen ("Loading, please wait": loading a saved game), 0x4075c0
+// (thiscall(kind), called at 0x44d4c5 and 0x44e076).
+static void __fastcall Hook_LoadScreenBeginGeneric(void* self, void* edx, uint32_t kind)
+{
+    LoadScreenMode640();
+    ((PFN_Void1)0x4075c0)(self, edx, (void*)(uintptr_t)kind);
+}
+struct VideoMode { int w, h, bpp; uint8_t flag; uint8_t pad[3]; };
+static VideoMode g_modeBeforeLoadScreen;
+static bool g_loadScreenSwitched = false;
+static int g_stateBeforeLoadScreen = -1;
+typedef int(__fastcall* PFN_VideoMode)(void* self, void* edx, void* mode);
+static void LoadScreenMode640()
+{
+    uintptr_t j = *(uintptr_t*)addr::G_Juego;
+    if (!j) return;
+    void* video = *(void**)0xC15BDC;
+    if (video) {
+        VideoMode mode = {};
+        ((PFN_VideoMode)0x8ed510)(video, nullptr, &mode);
+        if (mode.w != 640 || mode.h != 480) {
+            g_modeBeforeLoadScreen = mode;
+            g_loadScreenSwitched = true;
+            g_stateBeforeLoadScreen = At<int>(j, addr::J_State);
+            mode.w = 640; mode.h = 480; mode.bpp = 16;
+            int r = ((PFN_VideoMode)0x8ed530)(video, nullptr, &mode);
+            Log("loading screen: display switched to 640x480 (%d)\n", r);
+        }
+    }
+}
+// After the logic update that ran the loading screen: if the game is still on the
+// same screen (quick save in the mission or the pause menu, quick load in the
+// mission), restore the previous mode. Restarting / loading from the pause menu move
+// on to the briefing or mission, which set their resolution themselves.
+static void LoadScreenRestoreMode()
+{
+    if (!g_loadScreenSwitched) return;
+    g_loadScreenSwitched = false;
+    uintptr_t j = *(uintptr_t*)addr::G_Juego;
+    void* video = *(void**)0xC15BDC;
+    if (j && video && At<int>(j, addr::J_State) == g_stateBeforeLoadScreen) {
+        int r = ((PFN_VideoMode)0x8ed530)(video, nullptr, &g_modeBeforeLoadScreen);
+        Log("loading screen ended on the same screen: display restored to %dx%d (%d)\n",
+            g_modeBeforeLoadScreen.w, g_modeBeforeLoadScreen.h, r);
+    }
+}
+
+static uint8_t* g_missionScreen = nullptr;
+typedef void(__fastcall* PFN_ScreenSetMode)(void* self, void* edx, int w, int h);
+static void __fastcall Hook_MissionActivateMode(void* self, void* edx, int w, int h)
+{
+    g_missionScreen = (uint8_t*)self;
+    if (((uint8_t*)self)[9]) w = 640, h = 480;   // reload pending: switch after it
+    ((PFN_ScreenSetMode)0x7add80)(self, edx, w, h);
+}
+static void __fastcall Hook_MissionReload(void* self, void* edx)
+{
+    ((PFN_Void0)0x447640)(self, edx);
+    uintptr_t opt = *(uintptr_t*)0xBCBADC;   // options
+    typedef int(__fastcall* PFN_Get)(void*, void*);
+    int w = ((PFN_Get)0x413fa0)((void*)opt, nullptr), h = ((PFN_Get)0x413fe0)((void*)opt, nullptr);
+    if (g_missionScreen && w > 0 && h > 0) ((PFN_ScreenSetMode)0x7add80)(g_missionScreen, nullptr, w, h);
+}
+
 static void PatchHDMenus()
 {
     struct { uintptr_t site; uintptr_t from; uintptr_t to; } sites[] = {
@@ -2525,7 +2613,12 @@ static void PatchHDMenus()
     };
     int ok = 0;
     for (auto& s : sites) ok += PatchCallRel32(s.site, s.from, (void*)s.to) ? 1 : 0;
-    Log("HD pause menu: %d/2 patched\n", ok);
+    ok += PatchCallRel32(0x7abc2d, 0x7add80, (void*)&Hook_MissionActivateMode) ? 1 : 0;
+    ok += PatchCallRel32(0x7abc46, 0x447640, (void*)&Hook_MissionReload) ? 1 : 0;
+    ok += PatchCallRel32(0x44c901, 0x4079d0, (void*)&Hook_LoadScreenBegin) ? 1 : 0;
+    ok += PatchCallRel32(0x44d4c5, 0x4075c0, (void*)&Hook_LoadScreenBeginGeneric) ? 1 : 0;
+    ok += PatchCallRel32(0x44e076, 0x4075c0, (void*)&Hook_LoadScreenBeginGeneric) ? 1 : 0;
+    Log("HD pause menu: %d/7 patched\n", ok);
 }
 
 static void PatchHDResolution()
