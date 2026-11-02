@@ -19,6 +19,8 @@ It also fixes several bugs of the original game at modern resolutions.
 | Full HD mission (Das Boot, Silent Killer) | Full-screen pause menu over the game in HD |
 |---|---|
 | ![Full HD mission](docs/images/mission.png) | ![Pause menu in HD](docs/images/pause.png) |
+| **3D interior in Full HD** | **Video options: pick 1280x720 (16:9) for the HD mode** |
+| ![Interior in Full HD](docs/images/interior.png) | ![Video options](docs/images/options.png) |
 
 ## Features
 
