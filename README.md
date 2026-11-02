@@ -1,25 +1,60 @@
 # Commandos2-ModernPatch
 
-High frame rate, Full HD and quality-of-life patch for **Commandos 2: Men of Courage** (Steam).
+[![Latest release](https://img.shields.io/github/v/release/TweenzY-Y/Commandos2-ModernPatch)](../../releases/latest)
+[![Downloads](https://img.shields.io/github/downloads/TweenzY-Y/Commandos2-ModernPatch/total)](../../releases)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
+
+High frame rate, Full HD and bug-fix patch for **Commandos 2: Men of Courage** (Steam).
 
 Commandos 2 runs its game logic and its rendering at a fixed 25 frames per second.
 Commandos2-ModernPatch keeps the game logic at its original 25 ticks per second — so
 game speed, AI and mission scripts are unchanged — but renders as many frames as your
 monitor can show in between, moving the camera and everything on the map smoothly.
+It also fixes several bugs of the original game at modern resolutions.
+
+<!-- Comparison video: replace VIDEO_ID with the YouTube video id.
+[![Comparison video](https://img.youtube.com/vi/VIDEO_ID/maxresdefault.jpg)](https://www.youtube.com/watch?v=VIDEO_ID)
+-->
+
+<!-- Screenshots: add images to docs/images/ and uncomment.
+| | |
+|---|---|
+| ![Full HD mission](docs/images/mission.png) | ![Pause menu in HD](docs/images/pause.png) |
+-->
 
 ## Features
 
-- **Smooth rendering** at your monitor's refresh rate (e.g. 144/240 Hz): camera
-  scrolling and zoom, soldiers, enemies, vehicles and projectiles.
-- **Smooth cursor**, including dragging items in the inventory and the menus.
-- **Full HD (or any) resolution** for the game's HD video mode (originally 1280×720).
-- **Full-screen pause menu** in HD: the menu is scaled up over a sharp view of the game.
-- **No black screens** when the game switches resolution (pause menu, briefings) —
-  borderless full screen through the bundled [cnc-ddraw](https://github.com/FunkyFr3sh/cnc-ddraw).
-- Original behaviour preserved where smoothing is not possible: character animation
-  frames, the 3D portraits and the animated cursor run at their original speed.
-- Everything can be switched off in `Commandos2-ModernPatch.ini`, and toggled in game:
-  **F10** — whole patch on/off, **F11** — smooth movement of objects on/off.
+**Smooth rendering**
+- Rendering at your monitor's refresh rate (e.g. 144/240 Hz) while the game logic stays
+  at 25 ticks per second: camera scrolling, zoom and rotation, soldiers, enemies,
+  vehicles and projectiles move smoothly.
+- Smooth rotation of building and vehicle interiors (Alt + middle mouse button) and of
+  the window shown when peeking through a door.
+- Smooth cursor, including dragging items in the inventory and the menus; the pick-up
+  shine on bonus books plays at its original speed, drawn smoothly.
+- Even frame pacing, also with a frame rate cap (`MaxFps`).
+
+**Full HD**
+- Full HD (or any) resolution for the game's HD video mode (originally 1280×720).
+- Full-screen pause menu in HD: the menu is scaled up over a sharp view of the game.
+- No black screens when the game switches resolution — borderless full screen through
+  the bundled [cnc-ddraw](https://github.com/FunkyFr3sh/cnc-ddraw). Loading screens fill
+  the screen.
+
+**Fixes for bugs of the original game**
+- Crash when zooming in at resolutions above 1280×720.
+- Holes and smeared areas in the map when zoomed out at high resolutions.
+- Quick repeated clicks in the inventory were ignored (picking up and dropping an item).
+- The cheat password changed in the Steam version: both `PYROFOREVER` and the classic
+  `GONZOANDJON` work, or enable cheats with `Cheats=1`.
+
+**Performance**
+- Faster rendering of water, and of the map while the camera is still.
+
+Original behaviour is kept where smoothing is not possible: character animation frames,
+the 3D portraits and the animated cursor run at their original speed. Everything can be
+switched off in `Commandos2-ModernPatch.ini`, and toggled in game: **F10** — whole patch
+on/off, **F11** — smooth movement of objects on/off.
 
 No game files are modified; the patch is a `ddraw.dll` placed next to the game and
 applies its changes in memory while the game runs.
@@ -83,6 +118,8 @@ during a mission (single player), or set `Cheats=1` to skip the password. Cheat 
 - Menus are 640×480 artwork and are shown with black bars (4:3).
 - Camera and object positions are shown one logic tick (40 ms) behind; unit orders and
   game timing are not affected.
+- Mainly tested at 1920×1080. At 4K or ultrawide resolutions the map can show missing
+  areas when fully zoomed out; reports from such setups are welcome.
 
 ## Troubleshooting
 
