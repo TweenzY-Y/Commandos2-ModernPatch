@@ -62,6 +62,16 @@ histogram of frame intervals (4 ms buckets) every 5 seconds.
   cones; visuals array `+0x8C`, count `+0x90`) or drawn at several positions within one
   tick are not interpolated. Jumps over 150 units snap.
 
+- **Zoom** — `cam+0x74` is world units per screen pixel (screen = (world − pos) / zoom),
+  but the draw uses values derived from it once per tick (camera setup `0x7ebfff`):
+  `+0x70` = 1 / zoom and the view size `+0x94/+0x98` = window size (`+0x80/+0x84`) ×
+  zoom; the map background (`cam+0x10C`) has its own drawing scale `+0x2C` = camera
+  scale (`+0x28`) × `+0x24` (1 / bitmap level scale) and `+0x30` = 1 / `+0x2C`. All of
+  them are set for the interpolated zoom during the draw and restored afterwards (the
+  game's background update would also reload map tiles, and change the bitmap level).
+  Zoom and position changes between two ticks form a scaling around one fixed screen
+  point (per axis S = (pos1 − pos0) / (zoom0 − zoom1)); the zoom is interpolated
+  geometrically and the position chosen so that this point stays in place.
 - **Rotation** (interiors, Alt + middle mouse button) — angle at `cam+0x28` (2^32 = one
   turn) and the projection matrix at `cam+0x38` (see `0x7e1c60`: `x = c*px + s*py + T0`,
   `y = s*kB*px - c*kB*py + ... + T1`, rows at `+0x38/+0x3C`, `+0x44/+0x48`,

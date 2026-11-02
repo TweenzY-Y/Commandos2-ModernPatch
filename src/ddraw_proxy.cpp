@@ -14,7 +14,7 @@
 // F11 object smoothing. See README.md and docs/TECHNICAL.md.
 
 #define MOD_NAME "Commandos2-ModernPatch"   // ini/log/folder name in the game directory
-#define MOD_VERSION "1.1.8"
+#define MOD_VERSION "1.1.9"
 
 #include <windows.h>
 #include <mmsystem.h>
@@ -437,9 +437,59 @@ static void __fastcall Hook_VisorDraw(void* self, void* edx, void* canvas)
     }
 
     float a = g_alpha;
+    float wantZoom = s->prev[2] + (s->cur[2] - s->prev[2]) * a;
     At<float>(cam, addr::CAM_X) = s->prev[0] + (s->cur[0] - s->prev[0]) * a;
     At<float>(cam, addr::CAM_Y) = s->prev[1] + (s->cur[1] - s->prev[1]) * a;
-    At<float>(cam, addr::CAM_Zoom) = s->prev[2] + (s->cur[2] - s->prev[2]) * a;
+    // Zoom: +0x74 is world units per screen pixel, screen = (world - pos) / zoom. A
+    // change of zoom and position between two ticks is a scaling around one fixed
+    // screen point S (per axis: S = (pos1 - pos0) / (zoom0 - zoom1)) showing world
+    // point A = pos0 + S * zoom0. Interpolate the zoom geometrically (constant zoom
+    // speed) and place the camera so that A stays at S, instead of interpolating
+    // position and zoom independently (which makes the picture wobble).
+    {
+        const float z0 = s->prev[2], z1 = s->cur[2];
+        if (z0 > 0 && z1 > 0 && fabsf(z1 - z0) > 1e-4f * z0) {
+            const double z = z0 * pow((double)z1 / z0, (double)a);
+            for (int i = 0; i < 2; i++) {
+                const double S = ((double)s->cur[i] - s->prev[i]) / ((double)z0 - z1);
+                const double A = s->prev[i] + S * z0;
+                At<float>(cam, i ? addr::CAM_Y : addr::CAM_X) = (float)(A - S * z);
+            }
+            wantZoom = (float)z;
+        }
+    }
+    At<float>(cam, addr::CAM_Zoom) = wantZoom;
+    // The draw does not use the zoom itself but values derived from it once per tick
+    // (see the camera setup at 0x7ebfff): +0x70 = 1 / zoom (screen pixels per world
+    // unit) and the view size +0x94/+0x98 = window size (+0x80/+0x84, ints) * zoom.
+    // Set them for the interpolated zoom too, otherwise the scale only changes per tick.
+    const float saved70 = At<float>(cam, 0x70), saved94 = At<float>(cam, 0x94), saved98 = At<float>(cam, 0x98);
+    float want70 = saved70, want94 = saved94, want98 = saved98;
+    bool zoomDerived = false;
+    uintptr_t bgObj = 0;
+    float bgSaved[3] = {}, bgWant[3] = {};
+    if (wantZoom > 0 && wantZoom != actual[2]) {
+        want70 = 1.0f / wantZoom;
+        want94 = (float)At<int>(cam, 0x80) * wantZoom;
+        want98 = (float)At<int>(cam, 0x84) * wantZoom;
+        At<float>(cam, 0x70) = want70; At<float>(cam, 0x94) = want94; At<float>(cam, 0x98) = want98;
+        zoomDerived = true;
+        // The map background (cam+0x10C, drawn if byte cam+0x108) keeps its own copy
+        // of the scale, set per tick by the camera's background update 0x7e74c0 /
+        // 0x857d20: +0x24 = 1 / bitmap level scale, +0x28 = camera scale, +0x2C =
+        // +0x28 * +0x24 (drawing scale), +0x30 = 1 / +0x2C. Set the drawing scale for
+        // the interpolated view and restore it after the draw (calling the game's
+        // update every frame would also reload map tiles).
+        bgObj = At<uint8_t>(cam, 0x108) ? At<uintptr_t>(cam, 0x10c) : 0;
+        if (bgObj && At<uint8_t>(bgObj, 0) && At<float>(bgObj, 0x24) > 0) {
+            bgSaved[0] = At<float>(bgObj, 0x28); bgSaved[1] = At<float>(bgObj, 0x2c); bgSaved[2] = At<float>(bgObj, 0x30);
+            const float f2c = want70 * At<float>(bgObj, 0x24);
+            bgWant[0] = want70; bgWant[1] = f2c; bgWant[2] = f2c > 0 ? 1.0f / f2c : 0.0f;
+            At<float>(bgObj, 0x28) = bgWant[0]; At<float>(bgObj, 0x2c) = bgWant[1]; At<float>(bgObj, 0x30) = bgWant[2];
+        } else {
+            bgObj = 0;
+        }
+    }
 
     // Rotation / tilt between the two ticks: interpolate the angle and the tilt; in
     // the main view keep the ground point in the middle of the view in place (the
@@ -500,7 +550,16 @@ static void __fastcall Hook_VisorDraw(void* self, void* edx, void* canvas)
     // Restore unless the draw itself changed the camera (then keep the game's value).
     if (At<float>(cam, addr::CAM_X) == wantX) At<float>(cam, addr::CAM_X) = actual[0];
     if (At<float>(cam, addr::CAM_Y) == wantY) At<float>(cam, addr::CAM_Y) = actual[1];
-    if (At<float>(cam, addr::CAM_Zoom) == s->prev[2] + (s->cur[2] - s->prev[2]) * a) At<float>(cam, addr::CAM_Zoom) = actual[2];
+    if (At<float>(cam, addr::CAM_Zoom) == wantZoom) At<float>(cam, addr::CAM_Zoom) = actual[2];
+    if (zoomDerived) {
+        if (At<float>(cam, 0x70) == want70) At<float>(cam, 0x70) = saved70;
+        if (At<float>(cam, 0x94) == want94) At<float>(cam, 0x94) = saved94;
+        if (At<float>(cam, 0x98) == want98) At<float>(cam, 0x98) = saved98;
+    }
+    if (bgObj) {
+        for (int i = 0; i < 3; i++)
+            if (At<float>(bgObj, 0x28 + 4 * i) == bgWant[i]) At<float>(bgObj, 0x28 + 4 * i) = bgSaved[i];
+    }
     (void)c;
 }
 
