@@ -16,7 +16,7 @@ It also fixes several bugs of the original game at modern resolutions.
 [![Comparison video](https://img.youtube.com/vi/VIDEO_ID/maxresdefault.jpg)](https://www.youtube.com/watch?v=VIDEO_ID)
 -->
 
-| Full HD mission (Night of the Wolves) | Full-screen pause menu over the game in HD |
+| Full HD mission (Das Boot, Silent Killer) | Full-screen pause menu over the game in HD |
 |---|---|
 | ![Full HD mission](docs/images/mission.png) | ![Pause menu in HD](docs/images/pause.png) |
 
