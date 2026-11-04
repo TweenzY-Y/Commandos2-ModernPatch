@@ -76,17 +76,20 @@ histogram of frame intervals (4 ms buckets) every 5 seconds.
   turn) and the projection matrix at `cam+0x38` (see `0x7e1c60`: `x = c*px + s*py + T0`,
   `y = s*kB*px - c*kB*py + ... + T1`, rows at `+0x38/+0x3C`, `+0x44/+0x48`,
   `+0x50/+0x54`, translation `+0x5C/+0x60`; screen = (proj - pos) * `+0x70`). The angle
-  is interpolated, the matrix rebuilt, and the position chosen so the ground point in the
-  middle of the view stays in place (the game rotates around it). Interiors are rendered
+  is interpolated, the matrix rebuilt, and the position chosen so that the ground point
+  W which the game's own change from tick to tick leaves in place stays in place: with
+  ground rows R = [[c, s], [r, q]] (`+0x38/+0x3C`, `+0x50/+0x54`), W solves
+  (R0 − R1) W = pos0 − pos1 + T1 − T0. A turn of 45° or more in one tick (outdoor maps:
+  Alt + left / right mouse button turns the view by 90° at once) is a view switch: the
+  angle and the position snap, as in the original. Interiors are rendered
   in 3D into an image (`cam+0xA0`) only when the camera's changed flag `cam+0x124` is set
   (world draw `0x7ea8a7`), once per tick; during a rotation the flag is set for extra
   frames so the room is rendered with the interpolated angle. While the middle button is
   held the cursor is not polled in extra frames (the rotation uses the cursor movement).
 - **Tilt** (peeking through a door up/down) — the z column of the matrix (`+0x40/+0x4C/+0x58`)
-  and the row factors kA/kB change; they are interpolated with the angle. The view-centre
-  pivot is only used in the main view (at least half the screen wide) with a usable tilt;
-  small viewers (door peek window) interpolate the position linearly, as they turn around
-  another point.
+  and the row factors kA/kB change; they are interpolated with the angle. When the fixed
+  point cannot be solved (tilt only, near-horizontal view in the door peek window) the
+  position is interpolated linearly.
 
 ## Per-draw animations (must not advance in extra frames)
 

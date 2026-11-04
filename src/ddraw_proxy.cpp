@@ -14,7 +14,7 @@
 // F11 object smoothing. See README.md and docs/TECHNICAL.md.
 
 #define MOD_NAME "Commandos2-ModernPatch"   // ini/log/folder name in the game directory
-#define MOD_VERSION "1.1.9"
+#define MOD_VERSION "1.1.10"
 
 #include <windows.h>
 #include <mmsystem.h>
@@ -432,8 +432,16 @@ static void __fastcall Hook_VisorDraw(void* self, void* edx, void* canvas)
         // Large jumps (centering on a unit, switching views): snap.
         float dx = s->cur[0] - s->prev[0], dy = s->cur[1] - s->prev[1];
         float zoomRatio = s->cur[2] / (s->prev[2] != 0 ? s->prev[2] : 1.0f);
-        if (dx * dx + dy * dy > 300.0f * 300.0f || zoomRatio > 1.5f || zoomRatio < 0.66f)
+        // A turn of 45 degrees or more in one tick is a view switch, not an animation:
+        // on outdoor maps Alt + left / right mouse button turns the view by 90 degrees
+        // at once and moves the camera with it. Snap the position too, otherwise the
+        // already turned map slides for one tick.
+        const int32_t turn = (int32_t)(s->rcur.bam - s->rprev.bam);
+        const bool viewSwitch = turn <= -0x20000000 || turn >= 0x20000000;
+        if (dx * dx + dy * dy > 300.0f * 300.0f || zoomRatio > 1.5f || zoomRatio < 0.66f || viewSwitch) {
             memcpy(s->prev, s->cur, sizeof(actual));
+            s->rprev = s->rcur;
+        }
     }
 
     float a = g_alpha;
@@ -502,17 +510,8 @@ static void __fastcall Hook_VisorDraw(void* self, void* edx, void* canvas)
     if (matrixChanged && dBam > -0x20000000 && dBam < 0x20000000 && s->rprev.scale == s->rcur.scale &&
         s->rcur.scale > 0 && s->prev[2] == s->cur[2]) {
         const CamRot& p0 = s->rprev; const CamRot& p1 = s->rcur;
-        float cx = At<int>(viewer, 0x3c) * 0.5f, cy = At<int>(viewer, 0x40) * 0.5f;
-        if (!(cx > 0 && cx < 10000 && cy > 0 && cy < 10000)) { cx = 320; cy = 240; }
         auto kOf = [](const CamRot& r, int i) { return r.m[i] * r.m[1] - r.m[i + 1] * r.m[0]; };  // s*k*s + c*k*c
-        auto pivot = [&](const CamRot& r, float* P) {
-            float c = r.m[0], sn = r.m[1], kB = kOf(r, 4);
-            float u = r.pos[0] + cx / r.scale - r.t[0];
-            float v = (r.pos[1] + cy / r.scale - r.t[1]) / (kB != 0 ? kB : 1.0f);
-            P[0] = c * u + sn * v; P[1] = sn * u - c * v;
-        };
         const float kA0 = kOf(p0, 2), kB0 = kOf(p0, 4), kA1 = kOf(p1, 2), kB1 = kOf(p1, 4);
-        const bool usePivot = mainView && fabsf(kB0) > 0.2f && fabsf(kB1) > 0.2f;
         uint32_t bam = p0.bam + (uint32_t)(int32_t)((double)dBam * a);
         double th = bam * (6.283185307179586 / 4294967296.0);
         float c = (float)cos(th), sn = (float)sin(th);
@@ -524,14 +523,30 @@ static void __fastcall Hook_VisorDraw(void* self, void* edx, void* canvas)
         At<uint32_t>(cam, 0x28) = bam;
         for (int i = 0; i < 9; i++) At<float>(cam, kRotOffs[i]) = m[i];
         wroteM0 = m[0]; wroteM2 = m[2];
-        if (usePivot) {
-            float P0[2], P1[2];
-            pivot(p0, P0); pivot(p1, P1);
-            float P[2] = { P0[0] + (P1[0] - P0[0]) * a, P0[1] + (P1[1] - P0[1]) * a };
-            wantX = c * P[0] + sn * P[1] + p1.t[0] - cx / p1.scale;
-            wantY = kB * (sn * P[0] - c * P[1]) + p1.t[1] - cy / p1.scale;
-            At<float>(cam, addr::CAM_X) = wantX;
-            At<float>(cam, addr::CAM_Y) = wantY;
+        // Keep in place the ground point W that the game's own change from tick to
+        // tick leaves in place: with ground rows R = [[c, s], [r, q]] (+0x38/+0x3C,
+        // +0x50/+0x54) and screen = (R W + T - pos) * scale, W solves
+        // (R0 - R1) W = pos0 - pos1 + T1 - T0. The game may turn around the view
+        // centre or another point (Alt + mouse buttons); this finds it either way.
+        // Without a usable solution (no real turn, near-horizontal view) the position
+        // is interpolated linearly.
+        const double d00 = (double)p0.m[0] - p1.m[0], d01 = (double)p0.m[1] - p1.m[1];
+        const double d10 = (double)p0.m[4] - p1.m[4], d11 = (double)p0.m[5] - p1.m[5];
+        const double det = d00 * d11 - d01 * d10;
+        const double bx = (double)p0.pos[0] - p1.pos[0] + p1.t[0] - p0.t[0];
+        const double by = (double)p0.pos[1] - p1.pos[1] + p1.t[1] - p0.t[1];
+        if (fabs(det) > 1e-7) {
+            const double wx = (bx * d11 - d01 * by) / det, wy = (d00 * by - d10 * bx) / det;
+            if (fabs(wx) < 1e7 && fabs(wy) < 1e7) {
+                // W's place on screen (in projection units) in the previous tick
+                const double sx = p0.m[0] * wx + p0.m[1] * wy + p0.t[0] - p0.pos[0];
+                const double sy = p0.m[4] * wx + p0.m[5] * wy + p0.t[1] - p0.pos[1];
+                const double tx = p0.t[0] + (p1.t[0] - p0.t[0]) * a, ty = p0.t[1] + (p1.t[1] - p0.t[1]) * a;
+                wantX = (float)(m[0] * wx + m[1] * wy + tx - sx);
+                wantY = (float)(m[4] * wx + m[5] * wy + ty - sy);
+                At<float>(cam, addr::CAM_X) = wantX;
+                At<float>(cam, addr::CAM_Y) = wantY;
+            }
         }
         rotated = true;
         // Interiors are rendered in 3D into an image (cam+0xA0) only when the camera's
