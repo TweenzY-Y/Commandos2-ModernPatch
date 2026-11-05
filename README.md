@@ -37,6 +37,9 @@ It also fixes several bugs of the original game at modern resolutions.
 **Full HD**
 - Full HD (or any) resolution for the game's HD video mode (originally 1280×720).
 - Full-screen pause menu in HD: the menu is scaled up over a sharp view of the game.
+- Larger interface in missions: the command panel, inventory (including dragged items)
+  and the mission notebook are enlarged to match the resolution (`UIScale`), with
+  mouse input mapped accordingly.
 - No black screens when the game switches resolution — borderless full screen through
   the bundled [cnc-ddraw](https://github.com/FunkyFr3sh/cnc-ddraw). Loading screens fill
   the screen.
@@ -93,6 +96,7 @@ and the `Commandos2-ModernPatch` folder.
 | `HDResolution` | 1920x1080 | Resolution of the game's HD video mode |
 | `HDMenus` | 1 | Pause menu in the game resolution |
 | `PauseMenuScale` | 1 | 1 = stretched to full screen, 2 = enlarged 4:3, 0 = small and centred |
+| `UIScale` | 0 | Interface size in missions: 0 = automatic (screen height / 720), 1 = original, or a factor such as 2 |
 | `CncDDraw` | 1 | 1 = borderless full screen via cnc-ddraw, 0 = system DirectDraw |
 | `Cheats` | 0 | 1 = cheat keys always active (see below) |
 | `Optimizations` | 1 | Faster rendering of water and of the map while the camera is still (0 = original code; not in the ini by default) |

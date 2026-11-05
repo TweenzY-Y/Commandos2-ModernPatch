@@ -171,6 +171,38 @@ real mouse position (`0x793199`, `0x791138`). `GetCursorPos` for logic (`0x8e156
 menu space; the arrow poll `0x402e41` is not, because the game also draws the arrow
 immediately on mouse moves (`0x81ea20` → `0x81e830`).
 
+## Interface scaling (`UIScale`)
+
+The mission's windows are a flat list under its root window (window manager
+`mission+0x59C`, root at `+4`, `V_CVentana` vtable `0xAF2E94`, draw = slot 2): the world
+viewer (`CVentanaVisorMundo`, `0xAF37C4`) covering the screen and small interface windows
+at native size (CVentana rect `+0x34`..`+0x40`, children list sentinel `+0x4C`, first node
+`+0x50`, node `+4` next, `+8` window). Before the root draws, the rectangles of the
+non-viewer children are united per screen quarter. The world viewer hook saves these
+areas right after the main viewer has drawn; after the root has drawn, whatever differs
+is the interface (whichever routine drew it). The world is put back and the interface is
+drawn enlarged ("sharp bilinear"), anchored to its corner; unchanged pixels enclosed by
+interface pixels (same colour as the world by chance) are filled in.
+
+Mouse: mouse messages (window subclass) and the game's `GetCursorPos` reads (`0x8e1567`,
+`0x8ed9f5`, thunk `0x4067dc`) inside an enlarged area are mapped back to the original
+area — the windows' hover state comes from the messages, clicks from the event
+dispatcher `0x796580`. The arrow is drawn at the real mouse position (`0x793199`,
+`0x791138`); the extra-frame inventory drag shift maps the polled cursor too.
+
+Inventory: the manager's draw (thunk `0x8a5940` → `0x8a00b0`, from `0x7a7678` and
+`0x7a8486`) first draws the whole mission (`0x44bcf0` at `0x8a00cd`, i.e. after the
+interface composite), then the dragged item with its shadow and the pick-up shine in the
+game's coordinates. After the mission draw the interface areas and a box around the
+game's mouse position are saved and filled black; the manager's draw is repeated over
+white (mission draw and shine step skipped) to recover alpha and premultiplied colour.
+The areas are drawn enlarged at their places, the box enlarged around the real mouse.
+
+Mission notebook / object info (`CMAManual`, vtable `0xB16F14`, state 15; draw
+`0x7a82b0` = mission, then `0x5e94c0` at `0x7a82c8`): what the notebook draws over the
+mission is enlarged per screen quarter, anchored to the corner, with the mouse mapped
+back while it is shown.
+
 ### Loading screens
 
 The mission loading screen (object `[0xBCBB14]`, begin `0x4079d0` called at `0x44c901`;
@@ -191,6 +223,9 @@ to the game resolution afterwards.
 Always on: a vectored exception handler logs access violations inside the game code
 (address, registers and the last map-background blits) to `Commandos2-ModernPatch.log`
 before the game terminates.
+
+`Debug=1`: frame statistics, the mission's window tree (classes, vtables, rectangles)
+shortly after each state change, and the current screen's vtable when it changes.
 
 `Debug=2`: heap scan for RTTI objects, per-extra-frame memory diffs with owner
 attribution, automatic captures in menus/inventory and hardware watchpoints (DR0–DR3 via

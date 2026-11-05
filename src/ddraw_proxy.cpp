@@ -14,7 +14,7 @@
 // F11 object smoothing. See README.md and docs/TECHNICAL.md.
 
 #define MOD_NAME "Commandos2-ModernPatch"   // ini/log/folder name in the game directory
-#define MOD_VERSION "1.1.10"
+#define MOD_VERSION "1.2.0"
 
 #include <windows.h>
 #include <mmsystem.h>
@@ -103,6 +103,7 @@ struct Config {
     int debug = 0;          // 1 = stats, 2 = + automatic memory diagnostics
     int toggleKey = VK_F10;
     bool cheats = false;          // cheat keys active without typing the password
+    float uiScale = 0.0f;         // interface scale in the mission, 0 = auto (screen height / 720), 1 = off
 } g_cfg;
 
 static void LoadConfig()
@@ -153,6 +154,11 @@ static void LoadConfig()
     g_cfg.maxFps = GetPrivateProfileIntA(MOD_NAME,"MaxFps", 0, ini);
     g_cfg.debug = GetPrivateProfileIntA(MOD_NAME,"Debug", 0, ini);
     g_cfg.cheats = GetPrivateProfileIntA(MOD_NAME,"Cheats", 0, ini) != 0;
+    {
+        char ui[32];
+        GetPrivateProfileStringA(MOD_NAME, "UIScale", "0", ui, sizeof(ui), ini);
+        g_cfg.uiScale = (float)atof(ui);
+    }
     if (g_cfg.maxFps <= 0) {
         HDC dc = GetDC(nullptr);
         int hz = GetDeviceCaps(dc, VREFRESH);
@@ -392,6 +398,7 @@ static float TargetFps()
 static volatile uint8_t g_inExtraFrame = 0;
 
 static void DumpBmp(const char* name, const uint16_t* src, int w, int h, int pitchPx, bool is555);
+static void UiAfterViewer(void* canvas);
 // World viewer draw: render with an interpolated camera, then restore it.
 static void __fastcall Hook_VisorDraw(void* self, void* edx, void* canvas)
 {
@@ -404,6 +411,7 @@ static void __fastcall Hook_VisorDraw(void* self, void* edx, void* canvas)
     const bool mainView = surfW > 0 && At<int>(viewer, 0x3c) * 2 >= surfW;
     if (!g_interpolating || !g_cfg.camera || !cam) {
         Game_VisorDraw(self, edx, canvas);
+        if (mainView) UiAfterViewer(canvas);
         return;
     }
 
@@ -556,6 +564,7 @@ static void __fastcall Hook_VisorDraw(void* self, void* edx, void* canvas)
     }
 
     Game_VisorDraw(self, edx, canvas);
+    if (mainView) UiAfterViewer(canvas);
 
     if (rotated && At<float>(cam, 0x38) == wroteM0 && At<float>(cam, 0x44) == wroteM2) {   // unless the draw changed the camera
         At<uint8_t>(cam, 0x124) = 1;   // next draw (the tick frame) re-renders with the real view
@@ -579,6 +588,7 @@ static void __fastcall Hook_VisorDraw(void* self, void* edx, void* canvas)
 }
 
 static void DiagPoll(bool inGame);
+static void DiagWindowTrees();
 
 // Deliver pending mouse-move messages to the game between ticks, so the cursor,
 // dragged inventory items and selection boxes follow the mouse at full frame
@@ -602,6 +612,7 @@ namespace addr {
     constexpr int GRID_DragY = 0xa8;
 }
 static int g_tickMouseX = 0, g_tickMouseY = 0;
+static bool UiMapPoint(int& x, int& y);
 
 static bool CursorPos(int* x, int* y)
 {
@@ -703,6 +714,7 @@ static void __fastcall Hook_Update(void* self, void* edx)
             j ? At<int>(j, addr::J_State) : -1, j ? At<int>(j, addr::J_Transition) : -1);
     }
     if (g_cfg.debug >= 2) DiagPoll(inGame);
+    DiagWindowTrees();
 
     bool inMenu = !inGame && g_active && g_cfg.menus && IsMenuScreen();
     if (inMenu != g_inMenu) {
@@ -723,6 +735,7 @@ static void __fastcall Hook_Update(void* self, void* edx)
     g_tick++;
     g_statTicks++;
     CursorPos(&g_tickMouseX, &g_tickMouseY);   // where the cursor was when logic ran
+    UiMapPoint(g_tickMouseX, g_tickMouseY);      // (enlarged interface: as the game sees it)
 
     // Frame pacing: all frames (this tick's frame and the extra frames) follow one
     // steady clock of 1000/MaxFps ms. The tick's frame waits for its slot (before the
@@ -1155,6 +1168,47 @@ namespace diag {
 
 static void DiagPoll(bool inGame) { diag::Poll(inGame); }
 
+// ---- diagnostics (Debug=1): dump the window tree of the mission ----
+// CVentana: +0x34 x, +0x38 y, +0x3C w, +0x40 h (relative to the parent); children
+// list at +0x4C (sentinel node; first node at +0x50; node +4 next, +8 window).
+static int g_winDumpCount = 0;
+static void DumpWindowTree(uintptr_t w, int depth)
+{
+    if (!w || depth > 10 || g_winDumpCount > 400) return;
+    g_winDumpCount++;
+    char line[256];
+    __try {
+        uint32_t vt = *(uint32_t*)w;
+        int c = diag::FindClass(vt);
+        sprintf_s(line, "%*s%s %08X vt %08X rect %d,%d %dx%d", depth * 2, "", c >= 0 ? g_vtNames[c].name + 4 : "?",
+                  (unsigned)w, vt, At<int>(w, 0x34), At<int>(w, 0x38), At<int>(w, 0x3c), At<int>(w, 0x40));
+    } __except (EXCEPTION_EXECUTE_HANDLER) { return; }
+    Log("%s\n", line);
+    uintptr_t sentinel = w + 0x4c, node = 0;
+    __try { node = At<uintptr_t>(w, 0x50); } __except (EXCEPTION_EXECUTE_HANDLER) { return; }
+    for (int i = 0; node && node != sentinel && i < 100; i++) {
+        uintptr_t child = 0, next = 0;
+        __try { child = At<uintptr_t>(node, 8); next = At<uintptr_t>(node, 4); } __except (EXCEPTION_EXECUTE_HANDLER) { return; }
+        DumpWindowTree(child, depth + 1);
+        node = next;
+    }
+}
+static void DiagWindowTrees()
+{
+    static int lastState = -1, ticksInState = 0;
+    static bool dumped[32] = {};
+    uintptr_t j = *(uintptr_t*)addr::G_Juego, m = *(uintptr_t*)addr::G_Mision;
+    if (!g_cfg.debug || !j || !m) return;
+    int st = At<int>(j, addr::J_State);
+    if (st != lastState) { lastState = st; ticksInState = 0; }
+    if (++ticksInState != 75 || st < 0 || st >= 32 || dumped[st]) return;
+    dumped[st] = true;
+    uintptr_t mgr = At<uintptr_t>(m, 0x59c);
+    Log("window tree (state %d), mission window manager %08X:\n", st, (unsigned)mgr);
+    g_winDumpCount = 0;
+    if (mgr) DumpWindowTree(At<uintptr_t>(mgr, 4), 1);
+}
+
 // ---------------------------------------------------------------------------
 // 3D face sequences (CVisorSecuencias3D::Draw at 0x92a5f0) advance one keyframe
 // per draw call. In extra frames, skip the advance part and only draw the
@@ -1213,9 +1267,10 @@ namespace addr {
     constexpr uintptr_t InvEffectStep      = 0x92fd70;
 }
 static void* g_invEffectArg = nullptr;
+static bool g_invSecondPass = false;   // interface scaling draws the inventory item twice
 static void __fastcall Hook_InvEffectStep(void* self, void* edx, void* arg)
 {
-    if (g_inExtraFrame) return;
+    if (g_inExtraFrame || g_invSecondPass) return;
     g_invEffectArg = arg;
     ((PFN_Void1)addr::InvEffectStep)(self, edx, arg);
 }
@@ -1513,6 +1568,7 @@ static void __fastcall Hook_EndIter(void* canvas, void* edx)
             if (grid) {
                 int mx, my;
                 bool ok = CursorPos(&mx, &my);
+                if (ok) UiMapPoint(mx, my);
                 g_dbgMX = mx; g_dbgMY = my;
                 if (ok && (mx != g_tickMouseX || my != g_tickMouseY)) {
                     int dx = mx - g_tickMouseX, dy = my - g_tickMouseY;
@@ -1637,6 +1693,7 @@ static void UnlockSurface(uintptr_t surf)
 static WNDPROC g_origWndProc = nullptr;
 static HWND g_gameWnd = nullptr;
 
+static bool UiMapPoint(int& x, int& y);
 static LRESULT CALLBACK PauseWndProc(HWND h, UINT msg, WPARAM wp, LPARAM lp)
 {
     if (g_pauseScaleActive && g_pauseDW > 0 && msg >= WM_MOUSEFIRST && msg <= WM_MOUSELAST && msg != WM_MOUSEWHEEL) {
@@ -1646,6 +1703,9 @@ static LRESULT CALLBACK PauseWndProc(HWND h, UINT msg, WPARAM wp, LPARAM lp)
         x = x < 0 ? 0 : (x > 639 ? 639 : x);
         y = y < 0 ? 0 : (y > 479 ? 479 : y);
         lp = MAKELPARAM(x, y);
+    } else if (msg >= WM_MOUSEFIRST && msg <= WM_MOUSELAST && msg != WM_MOUSEWHEEL) {
+        int x = (short)LOWORD(lp), y = (short)HIWORD(lp);
+        if (UiMapPoint(x, y)) lp = MAKELPARAM(x, y);   // enlarged interface
     }
     return CallWindowProcA(g_origWndProc, h, msg, wp, lp);
 }
@@ -1658,7 +1718,7 @@ static BOOL CALLBACK FindGameWnd(HWND h, LPARAM)
 
 static void PauseUpdate()
 {
-    if (!g_origWndProc && g_cfg.hdMenus && g_cfg.pauseScale) {
+    if (!g_origWndProc && ((g_cfg.hdMenus && g_cfg.pauseScale) || g_cfg.uiScale != 1.0f)) {
         EnumThreadWindows(GetCurrentThreadId(), FindGameWnd, 0);
         if (g_gameWnd) {
             g_origWndProc = (WNDPROC)SetWindowLongA(g_gameWnd, GWL_WNDPROC, (LONG)(LONG_PTR)PauseWndProc);
@@ -1672,6 +1732,12 @@ static void PauseUpdate()
         active = scr && *(uintptr_t*)scr == addr::VT_MenuInGame;
     }
     if (active != g_pauseScaleActive) Log("scaled pause menu: %d\n", (int)active);
+    if (g_cfg.debug && j) {
+        static uintptr_t lastVt = 0;
+        uintptr_t scr = CurrentScreen(j);
+        uintptr_t vt = scr ? *(uintptr_t*)scr : 0;
+        if (vt != lastVt) { lastVt = vt; Log("screen vt %08X (state %d)\n", (unsigned)vt, At<int>(j, addr::J_State)); }
+    }
     g_pauseScaleActive = active;
 }
 
@@ -1886,8 +1952,16 @@ namespace addr {
     constexpr uintptr_t Site_DrawCursorJmp = 0x791138;    // jmp in CJuego::DrawCursor
 }
 static void DrawRealCursor(void* canvas);
+static int g_uiLastCount = 0;   // enlarged interface areas shown in the last frame
+static bool UiCursorMapped();
 static void __fastcall Hook_DrawCursor(void* cur, void* edx, void* canvas)
 {
+    if (!g_pauseScaleActive && UiCursorMapped()) {
+        // Enlarged interface: the game's cursor position is mapped into the original
+        // interface area; draw the arrow at the real position.
+        DrawRealCursor(canvas);
+        return;
+    }
     if (g_pauseScaleActive) {
         // Never draw the arrow at the menu-space position; with compositing it is
         // drawn by PauseComposite, otherwise draw it at the real position now.
@@ -1993,11 +2067,16 @@ static void PauseComposite(void* canvas)
     }
 }
 
+static bool UiMapPoint(int& x, int& y);
 // All of the game's cursor reads go through here: in the scaled pause menu,
 // map the screen position back into the 640x480 menu space.
 static BOOL WINAPI Hook_GetCursorPos(POINT* p)
 {
     BOOL r = (*(BOOL(WINAPI**)(POINT*))addr::IAT_GetCursorPos)(p);
+    if (r && p && !g_pauseScaleActive) {
+        int x = p->x, y = p->y;
+        if (UiMapPoint(x, y)) { p->x = x; p->y = y; }
+    }
     if (r && p && g_pauseScaleActive && g_pauseDW > 0) {
         int x = (int)((p->x - g_pauseDX) / g_pauseSX);
         int y = (int)((p->y - g_pauseDY) / g_pauseSY);
@@ -2023,6 +2102,7 @@ static void PatchIndirectToDirect(uintptr_t at, uint8_t modrm, uint8_t newOp, vo
     FlushInstructionCache(GetCurrentProcess(), p, 6);
 }
 
+static bool InstallCursorHooks();
 static void PatchScaledPause()
 {
     bool ok = PatchCallRel32(addr::Site_PauseWorld, addr::MisionDraw, (void*)&Hook_PauseWorld);
@@ -2030,7 +2110,16 @@ static void PatchScaledPause()
     ok &= PatchCallRel32(addr::Site_MenuLayoutSz, addr::GetScreenSize, (void*)&Hook_MenuLayoutScreenSize);
     ok &= PatchCallRel32(addr::Site_PauseLayout, addr::MenuLayout, (void*)&Hook_PauseLayout);
     ok &= PatchCallRel32(addr::Site_PauseBackdrop, addr::Blit, (void*)&Hook_PauseBackdrop);
-    ok &= PatchCallRel32(addr::Site_DrawCursorFrame, addr::DrawCursor, (void*)&Hook_DrawCursor);
+    ok &= InstallCursorHooks();
+    Log("scaled pause menu hooks: %s\n", ok ? "ok" : "FAILED");
+}
+
+static bool g_cursorReadHooks = false;
+static bool InstallCursorHooks()
+{
+    if (g_cursorReadHooks) return true;
+    g_cursorReadHooks = true;
+    bool ok = PatchCallRel32(addr::Site_DrawCursorFrame, addr::DrawCursor, (void*)&Hook_DrawCursor);
     {   // jmp rel32 at 0x791138 -> Hook_DrawCursor
         uint8_t* p = (uint8_t*)addr::Site_DrawCursorJmp;
         if (p[0] == 0xE9 && (uintptr_t)(addr::Site_DrawCursorJmp + 5 + *(int32_t*)(p + 1)) == addr::DrawCursor) {
@@ -2041,7 +2130,7 @@ static void PatchScaledPause()
     }
     for (uintptr_t s : addr::Sites_GetCursorPos) PatchIndirectToDirect(s, 0x15, 0xE8, (void*)&Hook_GetCursorPos);
     PatchIndirectToDirect(addr::Thunk_GetCursorPos, 0x25, 0xE9, (void*)&Hook_GetCursorPos);
-    Log("scaled pause menu hooks: %s\n", ok ? "ok" : "FAILED");
+    return ok;
 }
 
 // ---------------------------------------------------------------------------
@@ -2601,6 +2690,555 @@ static void PatchInventoryDoubleClick()
     Log("inventory double-click fix: ok\n");
 }
 
+// ---------------------------------------------------------------------------
+// Interface scaling (UIScale). The mission's windows are a flat list under the
+// root window (V_CVentana, vtable 0xAF2E94, draw = vtbl[2] drawing the children):
+// the world viewer covering the screen, plus small interface windows at native
+// size (the terminal in the top right corner; in the inventory the grid, faces
+// and buttons in the top left). Per screen corner the area covered by interface
+// windows is saved right after the world viewer has drawn; after the root has
+// drawn all children, whatever changed in that area is the interface (no matter
+// which window or routine drew it). The world is put back and the interface is
+// drawn enlarged, anchored to its corner. Mouse messages to the game window
+// and the game's cursor position reads that fall into an enlarged area are
+// mapped back to the original area; the arrow is drawn at the real position.
+// ---------------------------------------------------------------------------
+namespace addr {
+    constexpr uintptr_t VT_RootWindow = 0xAF2E94;   // V_CVentana
+}
+static PFN_Void1 g_rootWindowDraw = nullptr;
+
+struct UiArea {
+    bool right, bottom;      // anchor corner
+    int x, y, w, h;          // original area on the surface
+    int dx, dy, dw, dh;      // enlarged area
+    std::vector<uint16_t> world;   // the world below, saved after the viewer drew
+};
+static UiArea g_uiAreas[4];
+static int g_uiAreaCount = 0;
+static bool g_uiSaved = false;
+static UiArea g_uiLast[4];     // areas of the last composite (mouse mapping)
+static int g_uiDepth = 0;      // >0 while the root window draws
+static float g_uiScaleNow = 1.0f;
+
+static float UiScaleFor(int screenH)
+{
+    float s = g_cfg.uiScale;
+    if (s <= 0.0f) s = screenH / 720.0f;
+    if (s < 1.0f) s = 1.0f;
+    if (s > 4.0f) s = 4.0f;
+    return s;
+}
+static bool UiScalingActive()
+{
+    return g_active && g_cfg.uiScale != 1.0f;
+}
+// The mission's root window (window manager mission+0x59C, root at +4): drawn in
+// every state that shows the mission (playing, inventory, objectives, the pause
+// menu's background...).
+static bool UiIsMissionRoot(uintptr_t w)
+{
+    uintptr_t m = *(uintptr_t*)addr::G_Mision;
+    uintptr_t mgr = m ? At<uintptr_t>(m, 0x59c) : 0;
+    return mgr && At<uintptr_t>(mgr, 4) == w;
+}
+static DWORD g_uiLastTime = 0;   // time of the last composite
+static float g_ovScale = 1.0f;   // enlarged overlay screen (mission notebook)
+static DWORD g_ovTime = 0;
+static UiArea g_ovAreas[4];
+static int g_ovCount = 0;
+static bool UiOverlayShown()
+{
+    return g_ovTime && GetTickCount() - g_ovTime <= 250 && g_ovScale > 1.0f;
+}
+
+// Maps a screen position inside an enlarged interface area to the original area.
+static bool UiMapPoint(int& x, int& y)
+{
+    // not while the scaled pause menu maps the mouse, nor once the mission's
+    // interface is no longer drawn (menus)
+    if (!UiScalingActive() || g_pauseScaleActive) return false;
+    if (UiOverlayShown()) {
+        for (int k = 0; k < g_ovCount; k++) {
+            const UiArea& a = g_ovAreas[k];
+            if (x >= a.dx && x < a.dx + a.dw && y >= a.dy && y < a.dy + a.dh) {
+                x = a.x + (int)((x - a.dx) / g_ovScale);
+                y = a.y + (int)((y - a.dy) / g_ovScale);
+                return true;
+            }
+        }
+    }
+    if (g_uiLastCount == 0 || GetTickCount() - g_uiLastTime > 250) return false;
+    for (int k = 0; k < g_uiLastCount; k++) {
+        const UiArea& a = g_uiLast[k];
+        if (x >= a.dx && x < a.dx + a.dw && y >= a.dy && y < a.dy + a.dh) {
+            x = a.x + (int)((x - a.dx) / g_uiScaleNow);
+            y = a.y + (int)((y - a.dy) / g_uiScaleNow);
+            return true;
+        }
+    }
+    return false;
+}
+
+// True while the game's mouse position is mapped into interface space.
+static bool UiCursorMapped()
+{
+    return UiScalingActive() && !g_pauseScaleActive &&
+           (UiOverlayShown() || (g_uiLastCount > 0 && GetTickCount() - g_uiLastTime <= 250));
+}
+
+// Before the root draws: the interface area per screen corner from the children.
+static void UiCollectAreas(uintptr_t root, int W, int H)
+{
+    g_uiAreaCount = 0;
+    int x0[4] = {}, y0[4] = {}, x1[4] = {}, y1[4] = {};
+    bool used[4] = {};
+    __try {
+        uintptr_t sentinel = root + 0x4c, node = At<uintptr_t>(root, 0x50);
+        for (int i = 0; node && node != sentinel && i < 100; i++) {
+            uintptr_t w = At<uintptr_t>(node, 8);
+            node = At<uintptr_t>(node, 4);
+            if (!w || *(uintptr_t*)w == addr::VT_VisorMundo) continue;   // world views
+            int x = At<int>(w, 0x34), y = At<int>(w, 0x38), ww = At<int>(w, 0x3c), hh = At<int>(w, 0x40);
+            if (ww <= 0 || hh <= 0 || ww > W / 2 || hh > H / 2) continue;
+            int c = (x + ww / 2 > W / 2 ? 1 : 0) | (y + hh / 2 > H / 2 ? 2 : 0);
+            if (!used[c]) { used[c] = true; x0[c] = x; y0[c] = y; x1[c] = x + ww; y1[c] = y + hh; }
+            else {
+                if (x < x0[c]) x0[c] = x;
+                if (y < y0[c]) y0[c] = y;
+                if (x + ww > x1[c]) x1[c] = x + ww;
+                if (y + hh > y1[c]) y1[c] = y + hh;
+            }
+        }
+    } __except (EXCEPTION_EXECUTE_HANDLER) {}
+    for (int c = 0; c < 4; c++) {
+        if (!used[c]) continue;
+        UiArea& a = g_uiAreas[g_uiAreaCount];
+        a.right = (c & 1) != 0; a.bottom = (c & 2) != 0;
+        a.x = x0[c] < 0 ? 0 : x0[c]; a.y = y0[c] < 0 ? 0 : y0[c];
+        a.w = (x1[c] > W ? W : x1[c]) - a.x; a.h = (y1[c] > H ? H : y1[c]) - a.y;
+        if (a.w > 0 && a.h > 0) g_uiAreaCount++;
+    }
+}
+
+// Called by the world viewer hook right after a viewer has drawn.
+static void UiAfterViewer(void* canvas)
+{
+    if (g_uiDepth == 0 || g_uiSaved || !canvas) return;
+    uintptr_t surf = *(uintptr_t*)canvas;
+    uint8_t* base = surf ? At<uint8_t*>(surf, 4) : nullptr;
+    if (!base) return;
+    const int pitch = At<int>(surf, 8);
+    for (int k = 0; k < g_uiAreaCount; k++) {
+        UiArea& a = g_uiAreas[k];
+        a.world.resize((size_t)a.w * a.h);
+        for (int y = 0; y < a.h; y++)
+            memcpy(&a.world[(size_t)y * a.w], base + (size_t)(a.y + y) * pitch + a.x * 2, (size_t)a.w * 2);
+    }
+    g_uiSaved = true;
+}
+
+static inline uint32_t Unpack565(uint16_t c) { return ((c >> 11) << 16) | (((c >> 5) & 63) << 8) | (c & 31); }
+// "Sharp bilinear": pixels stay crisp, only their borders are smoothed.
+static inline float SharpFrac(float f, float s)
+{
+    f = (f - 0.5f) * s + 0.5f;
+    return f < 0 ? 0 : (f > 1 ? 1 : f);
+}
+
+// Interface pixel masks: 0 = not drawn, 1 = drawn (opaque), 4 = translucent
+// (alpha in fac, colour * alpha in the layer).
+// A pixel of the interface that happens to have the colour of what was below
+// looks "not drawn"; fill such holes between drawn pixels.
+static void UiFillHoles(uint8_t* mask, int w, int h)
+{
+    static std::vector<uint8_t> src;
+    src.assign(mask, mask + (size_t)w * h);
+    auto on = [&](int x, int y) { return x >= 0 && y >= 0 && x < w && y < h && src[(size_t)y * w + x] != 0; };
+    for (int y = 0; y < h; y++)
+        for (int x = 0; x < w; x++) {
+            size_t i = (size_t)y * w + x;
+            if (src[i]) continue;
+            if (((on(x - 1, y) || on(x - 2, y)) && (on(x + 1, y) || on(x + 2, y))) ||
+                ((on(x, y - 1) || on(x, y - 2)) && (on(x, y + 1) || on(x, y + 2))))
+                mask[i] = 1;
+        }
+}
+
+// Translucent pixel (mask 4): colour * alpha was drawn over black (c).
+static inline uint16_t UiApplyTranslucent(uint16_t d, uint16_t c, uint8_t alpha)
+{
+    const int k = 255 - alpha;
+    int r = (d >> 11) * k / 255 + (c >> 11), g = ((d >> 5) & 63) * k / 255 + ((c >> 5) & 63), b = (d & 31) * k / 255 + (c & 31);
+    if (r > 31) r = 31;
+    if (g > 63) g = 63;
+    if (b > 31) b = 31;
+    return (uint16_t)((r << 11) | (g << 5) | b);
+}
+
+// Draws the masked layer (w x h) enlarged by s at dx, dy (size dw x dh).
+static void UiScaleBlit(uint8_t* base, int pitch, int W, int H, const uint16_t* layer, const uint8_t* mask,
+                        int w, int h, int dx, int dy, int dw, int dh, float s, const uint8_t* fac = nullptr)
+{
+    const int yb = dy < 0 ? -dy : 0, ye = dy + dh > H ? H - dy : dh;
+    const int xb = dx < 0 ? -dx : 0, xe = dx + dw > W ? W - dx : dw;
+    for (int y = yb; y < ye; y++) {
+        uint16_t* row = (uint16_t*)(base + (size_t)(dy + y) * pitch);
+        float v = (y + 0.5f) / s - 0.5f;
+        int y0 = (int)floorf(v); float fy = v - y0;
+        if (y0 < 0) { y0 = 0; fy = 0; }
+        if (y0 > h - 1) y0 = h - 1;
+        int y1 = y0 + 1 < h ? y0 + 1 : y0;
+        fy = SharpFrac(fy, s);
+        for (int x = xb; x < xe; x++) {
+            float u = (x + 0.5f) / s - 0.5f;
+            int x0 = (int)floorf(u); float fx = u - x0;
+            if (x0 < 0) { x0 = 0; fx = 0; }
+            if (x0 > w - 1) x0 = w - 1;
+            int x1 = x0 + 1 < w ? x0 + 1 : x0;
+            fx = SharpFrac(fx, s);
+            size_t i00 = (size_t)y0 * w + x0, i01 = (size_t)y0 * w + x1;
+            size_t i10 = (size_t)y1 * w + x0, i11 = (size_t)y1 * w + x1;
+            size_t in = (size_t)(fy < 0.5f ? y0 : y1) * w + (fx < 0.5f ? x0 : x1);
+            if (!mask[in]) continue;
+            uint16_t* out = row + dx + x;
+            if (mask[in] == 4) { if (fac) *out = UiApplyTranslucent(*out, layer[in], fac[in]); continue; }
+            if (!(mask[i00] == 1 && mask[i01] == 1 && mask[i10] == 1 && mask[i11] == 1)) { *out = layer[in]; continue; }
+            uint32_t c00 = Unpack565(layer[i00]), c01 = Unpack565(layer[i01]);
+            uint32_t c10 = Unpack565(layer[i10]), c11 = Unpack565(layer[i11]);
+            int o[3];
+            for (int ch = 0; ch < 3; ch++) {
+                int sh = ch * 8;
+                float t = ((c00 >> sh) & 255) * (1 - fx) + ((c01 >> sh) & 255) * fx;
+                float b = ((c10 >> sh) & 255) * (1 - fx) + ((c11 >> sh) & 255) * fx;
+                o[ch] = (int)(t * (1 - fy) + b * fy + 0.5f);
+            }
+            *out = (uint16_t)((o[2] << 11) | (o[1] << 5) | o[0]);
+        }
+    }
+}
+
+static void UiComposite(void* canvas)
+{
+    const int32_t* cv = (const int32_t*)canvas;
+    uintptr_t surf = cv ? (uintptr_t)cv[0] : 0;
+    uint8_t* base = surf ? At<uint8_t*>(surf, 4) : nullptr;
+    if (!base || !g_uiSaved) { g_uiLastCount = 0; return; }
+    const int pitch = At<int>(surf, 8), W = At<int>(surf, 0x10), H = At<int>(surf, 0x14);
+    const float s = UiScaleFor(H);
+    g_uiScaleNow = s;
+    static std::vector<uint16_t> layer;
+    static std::vector<uint8_t> mask;
+    for (int k = 0; k < g_uiAreaCount; k++) {
+        UiArea& a = g_uiAreas[k];
+        // take the interface layer and put the world back
+        layer.resize((size_t)a.w * a.h);
+        mask.resize(layer.size());
+        bool any = false;
+        for (int y = 0; y < a.h; y++) {
+            uint16_t* row = (uint16_t*)(base + (size_t)(a.y + y) * pitch) + a.x;
+            for (int x = 0; x < a.w; x++) {
+                size_t i = (size_t)y * a.w + x;
+                layer[i] = row[x];
+                mask[i] = row[x] != a.world[i];
+                any |= mask[i] != 0;
+            }
+            memcpy(row, &a.world[(size_t)y * a.w], (size_t)a.w * 2);
+        }
+        a.dw = (int)(a.w * s + 0.5f); a.dh = (int)(a.h * s + 0.5f);
+        a.dx = a.right ? W - (int)((W - a.x) * s + 0.5f) : (int)(a.x * s + 0.5f);
+        a.dy = a.bottom ? H - (int)((H - a.y) * s + 0.5f) : (int)(a.y * s + 0.5f);
+        if (!any) continue;
+        UiFillHoles(mask.data(), a.w, a.h);
+        UiScaleBlit(base, pitch, W, H, layer.data(), mask.data(), a.w, a.h, a.dx, a.dy, a.dw, a.dh, s);
+    }
+    g_uiLastCount = 0;
+    g_uiLastTime = GetTickCount();
+    for (int k = 0; k < g_uiAreaCount; k++) {
+        UiArea& d = g_uiLast[g_uiLastCount++];
+        const UiArea& a = g_uiAreas[k];
+        d.right = a.right; d.bottom = a.bottom;
+        d.x = a.x; d.y = a.y; d.w = a.w; d.h = a.h; d.dx = a.dx; d.dy = a.dy; d.dw = a.dw; d.dh = a.dh;
+    }
+}
+
+static void __fastcall Hook_RootWindowDraw(void* self, void* edx, void* canvas)
+{
+    uintptr_t surf = canvas ? *(uintptr_t*)canvas : 0;
+    if (g_uiDepth > 0 || !surf || !UiScalingActive() || !UiIsMissionRoot((uintptr_t)self)) {
+        g_rootWindowDraw(self, edx, canvas);
+        return;
+    }
+    UiCollectAreas((uintptr_t)self, At<int>(surf, 0x10), At<int>(surf, 0x14));
+    g_uiSaved = false;
+    g_uiDepth++;
+    g_rootWindowDraw(self, edx, canvas);
+    g_uiDepth--;
+    UiComposite(canvas);
+}
+
+// The inventory manager's draw (thunk 0x8a5940 -> 0x8a00b0, from 0x7a7678 and
+// 0x7a8486) first draws the mission (0x44bcf0 at 0x8a00cd, which includes the
+// root window and so the enlarged interface), then the dragged item at the
+// mouse and the pick-up shine in the grid, both in the game's (interface)
+// coordinates. Right after the mission draw, save the original interface areas
+// and a box around the game's mouse position; after the manager's draw, move
+// what it drew there: the areas to their enlarged places, the box enlarged
+// around the real mouse position.
+namespace addr {
+    constexpr uintptr_t InvMgrDraw = 0x8a5940;
+    constexpr uintptr_t Site_InvMgrDrawCall = 0x7a7678;
+    constexpr uintptr_t Site_InvMgrDrawJmp = 0x7a8486;
+    constexpr uintptr_t MissionDraw = 0x44bcf0;
+    constexpr uintptr_t Site_InvMissionDraw = 0x8a00cd;
+}
+struct UiPatch {
+    int x, y, w, h;           // drawn here (game coordinates)
+    float cx, cy, ox, oy;     // screen = o + (p - c) * s
+    std::vector<uint16_t> under, layer;
+    std::vector<uint8_t> mask, fac;
+};
+static void UiPatchBlit(const UiPatch& p, uint8_t* base, int pitch, int W, int H, float sc)
+{
+    const int dx = (int)floorf(p.ox + (p.x - p.cx) * sc + 0.5f), dy = (int)floorf(p.oy + (p.y - p.cy) * sc + 0.5f);
+    UiScaleBlit(base, pitch, W, H, p.layer.data(), p.mask.data(), p.w, p.h, dx, dy,
+                (int)(p.w * sc + 0.5f), (int)(p.h * sc + 0.5f), sc, p.fac.data());
+}
+static UiPatch g_invPatches[5];
+static int g_invN = 0, g_invAreas = 0;
+static int g_invBox[4];          // box x0, y0, x1, y1
+static bool g_invArmed = false;
+
+static void UiFillPatches(uint8_t* base, int pitch, int n, uint16_t colour);
+static void __fastcall Hook_InvMissionDraw(void* self, void* edx, void* canvas)
+{
+    if (g_invSecondPass) return;
+    ((PFN_Void1)addr::MissionDraw)(self, edx, canvas);
+    if (!g_invArmed) return;
+    g_invArmed = false;
+    uintptr_t surf = canvas ? *(uintptr_t*)canvas : 0;
+    uint8_t* base = surf ? At<uint8_t*>(surf, 4) : nullptr;
+    if (!base || g_uiLastCount == 0) return;
+    const int pitch = At<int>(surf, 8), W = At<int>(surf, 0x10), H = At<int>(surf, 0x14);
+    int n = 0;
+    for (int k = 0; k < g_uiLastCount; k++) {
+        const UiArea& a = g_uiLast[k];
+        UiPatch& p = g_invPatches[n++];
+        p.x = a.x; p.y = a.y; p.w = a.w; p.h = a.h;
+        p.cx = (float)a.x; p.cy = (float)a.y; p.ox = (float)a.dx; p.oy = (float)a.dy;
+    }
+    g_invAreas = n;
+    g_invBox[0] = g_invBox[1] = g_invBox[2] = g_invBox[3] = 0;
+    POINT rp;
+    if ((*(BOOL(WINAPI**)(POINT*))addr::IAT_GetCursorPos)(&rp)) {
+        if (g_gameWnd) ScreenToClient(g_gameWnd, &rp);
+        int gx = rp.x, gy = rp.y;
+        UiMapPoint(gx, gy);
+        const int R = 192;
+        int* b = g_invBox;
+        b[0] = gx - R < 0 ? 0 : gx - R; b[1] = gy - R < 0 ? 0 : gy - R;
+        b[2] = gx + R > W ? W : gx + R; b[3] = gy + R > H ? H : gy + R;
+        if (b[2] > b[0] && b[3] > b[1]) {
+            UiPatch& p = g_invPatches[n++];
+            p.x = b[0]; p.y = b[1]; p.w = b[2] - b[0]; p.h = b[3] - b[1];
+            p.cx = (float)gx; p.cy = (float)gy; p.ox = (float)rp.x; p.oy = (float)rp.y;
+        }
+    }
+    for (int k = 0; k < n; k++) {
+        UiPatch& p = g_invPatches[k];
+        p.under.resize((size_t)p.w * p.h);
+        for (int y = 0; y < p.h; y++)
+            memcpy(&p.under[(size_t)y * p.w], base + (size_t)(p.y + y) * pitch + p.x * 2, (size_t)p.w * 2);
+    }
+    g_invN = n;
+    UiFillPatches(base, pitch, n, 0);
+}
+
+static void UiFillPatches(uint8_t* base, int pitch, int n, uint16_t colour)
+{
+    for (int k = 0; k < n; k++) {
+        const UiPatch& p = g_invPatches[k];
+        for (int y = 0; y < p.h; y++) {
+            uint16_t* row = (uint16_t*)(base + (size_t)(p.y + y) * pitch) + p.x;
+            for (int x = 0; x < p.w; x++) row[x] = colour;
+        }
+    }
+}
+
+// The item, its shadow and the shine are partly translucent. They are drawn
+// twice, over black and over white: over black a pixel is colour * alpha, over
+// white colour * alpha + (1 - alpha), which gives both exactly. The second draw
+// skips the mission draw and the shine's step.
+static void __fastcall Hook_InvMgrDraw(void* self, void* edx, void* canvas)
+{
+    uintptr_t surf = canvas ? *(uintptr_t*)canvas : 0;
+    uintptr_t j = *(uintptr_t*)addr::G_Juego;
+    if (!surf || !UiScalingActive() || !j || At<int>(j, addr::J_State) != 7) {
+        ((PFN_Void1)addr::InvMgrDraw)(self, edx, canvas);
+        return;
+    }
+    g_invN = 0;
+    g_invArmed = true;
+    ((PFN_Void1)addr::InvMgrDraw)(self, edx, canvas);   // mission, then the item over black
+    g_invArmed = false;
+    const int n = g_invN, areas = g_invAreas;
+    g_invN = 0;
+    uint8_t* base = At<uint8_t*>(surf, 4);
+    if (n == 0 || !base) return;
+    const int pitch = At<int>(surf, 8), W = At<int>(surf, 0x10), H = At<int>(surf, 0x14);
+    for (int k = 0; k < n; k++) {
+        UiPatch& p = g_invPatches[k];
+        p.layer.resize(p.under.size());
+        for (int y = 0; y < p.h; y++)
+            memcpy(&p.layer[(size_t)y * p.w], base + (size_t)(p.y + y) * pitch + p.x * 2, (size_t)p.w * 2);
+    }
+    UiFillPatches(base, pitch, n, 0xFFFF);
+    g_invSecondPass = true;
+    ((PFN_Void1)addr::InvMgrDraw)(self, edx, canvas);   // the item over white
+    g_invSecondPass = false;
+    const int* b = g_invBox;
+    const bool box = n > areas;
+    bool any[5] = {};
+    for (int k = 0; k < n; k++) {
+        UiPatch& p = g_invPatches[k];
+        p.mask.resize(p.under.size());
+        p.fac.resize(p.under.size());
+        for (int y = 0; y < p.h; y++) {
+            const uint16_t* row = (const uint16_t*)(base + (size_t)(p.y + y) * pitch) + p.x;
+            for (int x = 0; x < p.w; x++) {
+                size_t i = (size_t)y * p.w + x;
+                const uint16_t cb = p.layer[i], cw = row[x];
+                uint8_t m = 0, a8 = 0;
+                if (cb != 0 || cw != 0xFFFF) {
+                    // 1 - alpha per channel = (white - black) / max
+                    const int t = ((cw >> 11) - (cb >> 11)) * 255 / 31 + (((cw >> 5) & 63) - ((cb >> 5) & 63)) * 255 / 63 +
+                                  ((cw & 31) - (cb & 31)) * 255 / 31;
+                    int a = 255 - t / 3;
+                    a = a < 0 ? 0 : (a > 255 ? 255 : a);
+                    if (a >= 250) m = 1;
+                    else if (a >= 6) { m = 4; a8 = (uint8_t)a; }
+                }
+                // the box takes the dragged item, the areas leave it alone
+                if (m && k < areas && box) {
+                    int gx = p.x + x, gy = p.y + y;
+                    if (gx >= b[0] && gx < b[2] && gy >= b[1] && gy < b[3]) m = 0;
+                }
+                p.mask[i] = m;
+                p.fac[i] = a8;
+                any[k] |= m != 0;
+            }
+        }
+    }
+    for (int k = 0; k < n; k++) {   // put back what was there
+        UiPatch& p = g_invPatches[k];
+        for (int y = 0; y < p.h; y++)
+            memcpy(base + (size_t)(p.y + y) * pitch + p.x * 2, &p.under[(size_t)y * p.w], (size_t)p.w * 2);
+    }
+    for (int k = 0; k < n; k++)     // and draw it enlarged
+        if (any[k]) UiPatchBlit(g_invPatches[k], base, pitch, W, H, g_uiScaleNow);
+}
+
+// Mission notebook (CMAManual, draw 0x7a82b0: the mission, then the notebook by
+// 0x5e94c0 at 0x7a82c8) is drawn at native size in the top left corner (and
+// redraws parts of the terminal). Whatever it draws over the mission is enlarged
+// per screen quarter, anchored to that corner like the interface; the mouse is
+// mapped the other way while it is shown.
+namespace addr {
+    constexpr uintptr_t Site_ManualDraw = 0x7a82c8;
+    constexpr uintptr_t ManualDraw = 0x5e94c0;
+}
+static void __fastcall Hook_ManualDraw(void* self, void* edx, void* canvas)
+{
+    uintptr_t surf = canvas ? *(uintptr_t*)canvas : 0;
+    uint8_t* base = surf ? At<uint8_t*>(surf, 4) : nullptr;
+    if (!base || !UiScalingActive()) {
+        ((PFN_Void1)addr::ManualDraw)(self, edx, canvas);
+        return;
+    }
+    const int pitch = At<int>(surf, 8), W = At<int>(surf, 0x10), H = At<int>(surf, 0x14);
+    const float s = UiScaleFor(H);
+    static std::vector<uint16_t> under, layer;
+    static std::vector<uint8_t> mask;
+    under.resize((size_t)W * H);
+    for (int y = 0; y < H; y++) memcpy(&under[(size_t)y * W], base + (size_t)y * pitch, (size_t)W * 2);
+    ((PFN_Void1)addr::ManualDraw)(self, edx, canvas);
+    if (s <= 1.0f) return;
+    // changed pixels: bounding box per screen quarter
+    int x0[4], y0[4], x1[4], y1[4];
+    for (int c = 0; c < 4; c++) { x0[c] = W; y0[c] = H; x1[c] = -1; y1[c] = -1; }
+    for (int y = 0; y < H; y++) {
+        const uint16_t* row = (const uint16_t*)(base + (size_t)y * pitch);
+        const uint16_t* u = &under[(size_t)y * W];
+        const int cy = y < H / 2 ? 0 : 2;
+        for (int x = 0; x < W; x++)
+            if (row[x] != u[x]) {
+                const int c = cy | (x < W / 2 ? 0 : 1);
+                if (x < x0[c]) x0[c] = x;
+                if (x > x1[c]) x1[c] = x;
+                if (y < y0[c]) y0[c] = y;
+                if (y > y1[c]) y1[c] = y;
+            }
+    }
+    g_ovCount = 0;
+    g_ovTime = GetTickCount();
+    g_ovScale = s;
+    for (int c = 0; c < 4; c++) {
+        if (x1[c] < x0[c]) continue;
+        UiArea& a = g_ovAreas[g_ovCount++];
+        a.right = (c & 1) != 0; a.bottom = (c & 2) != 0;
+        a.x = x0[c]; a.y = y0[c]; a.w = x1[c] - x0[c] + 1; a.h = y1[c] - y0[c] + 1;
+        a.dw = (int)(a.w * s + 0.5f); a.dh = (int)(a.h * s + 0.5f);
+        a.dx = a.right ? W - (int)((W - a.x) * s + 0.5f) : (int)(a.x * s + 0.5f);
+        a.dy = a.bottom ? H - (int)((H - a.y) * s + 0.5f) : (int)(a.y * s + 0.5f);
+    }
+    // take every quarter's layer first (the enlarged ones overlap other quarters)
+    static std::vector<uint16_t> layers[4];
+    static std::vector<uint8_t> masks[4];
+    for (int k = 0; k < g_ovCount; k++) {
+        const UiArea& a = g_ovAreas[k];
+        layers[k].resize((size_t)a.w * a.h);
+        masks[k].resize((size_t)a.w * a.h);
+        for (int y = 0; y < a.h; y++) {
+            const uint16_t* row = (const uint16_t*)(base + (size_t)(a.y + y) * pitch) + a.x;
+            const uint16_t* u = &under[(size_t)(a.y + y) * W + a.x];
+            for (int x = 0; x < a.w; x++) {
+                layers[k][(size_t)y * a.w + x] = row[x];
+                masks[k][(size_t)y * a.w + x] = row[x] != u[x];
+            }
+        }
+    }
+    for (int k = 0; k < g_ovCount; k++) {
+        const UiArea& a = g_ovAreas[k];
+        for (int y = 0; y < a.h; y++)
+            memcpy(base + (size_t)(a.y + y) * pitch + a.x * 2, &under[(size_t)(a.y + y) * W + a.x], (size_t)a.w * 2);
+    }
+    for (int k = 0; k < g_ovCount; k++) {
+        const UiArea& a = g_ovAreas[k];
+        UiFillHoles(masks[k].data(), a.w, a.h);
+        UiScaleBlit(base, pitch, W, H, layers[k].data(), masks[k].data(), a.w, a.h, a.dx, a.dy, a.dw, a.dh, s);
+    }
+}
+
+static bool InstallCursorHooks();
+static void PatchUiScale()
+{
+    g_rootWindowDraw = (PFN_Void1)PatchVtable(addr::VT_RootWindow, 2, (void*)&Hook_RootWindowDraw);
+    bool ok = g_rootWindowDraw != nullptr;
+    ok &= PatchCallRel32(addr::Site_InvMgrDrawCall, addr::InvMgrDraw, (void*)&Hook_InvMgrDraw);
+    {   // jmp rel32 at 0x7a8486 -> Hook_InvMgrDraw
+        uint8_t* p = (uint8_t*)addr::Site_InvMgrDrawJmp;
+        if (p[0] == 0xE9 && (uintptr_t)(addr::Site_InvMgrDrawJmp + 5 + *(int32_t*)(p + 1)) == addr::InvMgrDraw) {
+            DWORD old; VirtualProtect(p, 5, PAGE_EXECUTE_READWRITE, &old);
+            *(int32_t*)(p + 1) = (int32_t)((uintptr_t)&Hook_InvMgrDraw - (addr::Site_InvMgrDrawJmp + 5));
+            VirtualProtect(p, 5, old, &old);
+        } else ok = false;
+    }
+    ok &= PatchCallRel32(addr::Site_InvMissionDraw, addr::MissionDraw, (void*)&Hook_InvMissionDraw);
+    ok &= PatchCallRel32(addr::Site_ManualDraw, addr::ManualDraw, (void*)&Hook_ManualDraw);
+    ok &= InstallCursorHooks();
+    Log("interface scaling hooks: %s (UIScale=%.2f)\n", ok ? "ok" : "FAILED", g_cfg.uiScale);
+}
+
 static void PatchCheats()
 {
     bool ok = PatchCallRel32(addr::Site_CheatMatch, addr::CheatMatch, (void*)&Hook_CheatMatch);
@@ -2903,6 +3541,7 @@ static void Init()
         char ini[MAX_PATH];
         sprintf_s(ini, "%s\\" MOD_NAME ".ini", g_dir);
         if (GetPrivateProfileIntA(MOD_NAME, "Optimizations", 1, ini)) PatchMapCache();
+        if (g_cfg.uiScale != 1.0f) PatchUiScale();
     }
     Log("hooks installed\n");
 }
