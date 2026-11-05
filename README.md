@@ -55,9 +55,12 @@ It also fixes several bugs of the original game at modern resolutions.
 - Faster rendering of water, and of the map while the camera is still.
 
 Original behaviour is kept where smoothing is not possible: character animation frames,
-the 3D portraits and the animated cursor run at their original speed. Everything can be
-switched off in `Commandos2-ModernPatch.ini`, and toggled in game: **F10** — whole patch
-on/off, **F11** — smooth movement of objects on/off.
+the 3D portraits and the animated cursor run at their original speed.
+
+**Settings menu:** press **Ctrl+Shift+F10** in game. Every option of
+`Commandos2-ModernPatch.ini` can be changed there (Basic and Advanced tabs, mouse or
+arrow keys); the game is paused while the menu is open and changes are saved at once.
+Options marked with `*` apply after restarting the game.
 
 No game files are modified; the patch is a `ddraw.dll` placed next to the game and
 applies its changes in memory while the game runs.
@@ -90,7 +93,7 @@ and the `Commandos2-ModernPatch` folder.
 |---|---|---|
 | `Enabled` | 1 | 0 = the game behaves exactly like the original |
 | `Camera` | 1 | Smooth camera scrolling and zoom |
-| `Objects` | 1 | Smooth movement of soldiers, vehicles, projectiles (F11) |
+| `Objects` | 1 | Smooth movement of soldiers, vehicles, projectiles |
 | `Mouse` | 1 | Smooth cursor and inventory dragging |
 | `Menus` | 1 | Smooth cursor in menus |
 | `HDResolution` | 1920x1080 | Resolution of the game's HD video mode |
@@ -102,6 +105,8 @@ and the `Commandos2-ModernPatch` folder.
 | `Optimizations` | 1 | Faster rendering of water and of the map while the camera is still (0 = original code; not in the ini by default) |
 | `MaxFps` | 0 | Frame rate cap, 0 = monitor refresh rate |
 | `Debug` | 0 | 1 = statistics in `Commandos2-ModernPatch.log` |
+
+All options can also be changed in game in the settings menu (**Ctrl+Shift+F10**).
 
 cnc-ddraw's own settings are in `Commandos2-ModernPatch\cnc-ddraw\ddraw.ini` (section
 `[comm2]`). **Alt+Enter** switches between full screen and a window.
@@ -139,7 +144,7 @@ recognised the game and which parts were enabled.
 | Black or flickering picture, wrong colours | In `Commandos2-ModernPatch\cnc-ddraw\ddraw.ini`, section `[comm2]`, change `renderer=auto` to `renderer=opengl`, `renderer=direct3d9` or `renderer=gdi`. Update the graphics driver. |
 | Stutter or low frame rate | Set `MaxFps` to your monitor refresh rate or lower (e.g. `MaxFps=60`). Check that the game runs on the dedicated graphics card on laptops. `Debug=1` writes frame statistics to the log. |
 | Mouse cursor is offset or clicks hit the wrong place | Make sure the Windows display scaling is not overridden for `Comm2.exe` (Properties → Compatibility → Change high DPI settings), and try without other mods. |
-| Something looks or behaves wrong only with the patch | Press **F10** to turn the patch off in game and compare. If it is only wrong with the patch, please open an issue. |
+| Something looks or behaves wrong only with the patch | Open the settings menu (**Ctrl+Shift+F10**) and turn **Smoothing** off to compare. If it is only wrong with the patch, please open an issue. |
 | Crash during the game | The log contains the crash address. Please open an issue and attach it. |
 
 **Reporting a problem:** open an issue on the [Issues](../../issues) page with the

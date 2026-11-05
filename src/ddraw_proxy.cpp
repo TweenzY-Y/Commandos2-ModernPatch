@@ -10,8 +10,8 @@
 // Also: smooth cursor/inventory dragging, menus, configurable HD resolution,
 // full-screen pause menu, optional cnc-ddraw backend (no display mode switches).
 //
-// Config: Commandos2-ModernPatch.ini next to Comm2.exe. F10 toggles the mod,
-// F11 object smoothing. See README.md and docs/TECHNICAL.md.
+// Config: Commandos2-ModernPatch.ini next to Comm2.exe, or the in-game settings
+// menu (Ctrl+Shift+F10). See README.md and docs/TECHNICAL.md.
 
 #define MOD_NAME "Commandos2-ModernPatch"   // ini/log/folder name in the game directory
 #define MOD_VERSION "1.2.0"
@@ -101,10 +101,21 @@ struct Config {
     bool cnc = true;              // use bundled cnc-ddraw (borderless, no mode switches)
     int maxFps = 0;        // 0 = monitor refresh rate
     int debug = 0;          // 1 = stats, 2 = + automatic memory diagnostics
-    int toggleKey = VK_F10;
     bool cheats = false;          // cheat keys active without typing the password
     float uiScale = 0.0f;         // interface scale in the mission, 0 = auto (screen height / 720), 1 = off
 } g_cfg;
+
+// MaxFps setting -> frame rate: 0 = monitor refresh rate, clamped to 25..1000.
+static int ResolveMaxFps(int v)
+{
+    if (v <= 0) {
+        HDC dc = GetDC(nullptr);
+        int hz = GetDeviceCaps(dc, VREFRESH);
+        ReleaseDC(nullptr, dc);
+        v = (hz > 1) ? hz : 60;
+    }
+    return v < 25 ? 25 : v > 1000 ? 1000 : v;
+}
 
 static void LoadConfig()
 {
@@ -159,14 +170,7 @@ static void LoadConfig()
         GetPrivateProfileStringA(MOD_NAME, "UIScale", "0", ui, sizeof(ui), ini);
         g_cfg.uiScale = (float)atof(ui);
     }
-    if (g_cfg.maxFps <= 0) {
-        HDC dc = GetDC(nullptr);
-        int hz = GetDeviceCaps(dc, VREFRESH);
-        ReleaseDC(nullptr, dc);
-        g_cfg.maxFps = (hz > 1) ? hz : 60;
-    }
-    if (g_cfg.maxFps < 25) g_cfg.maxFps = 25;
-    if (g_cfg.maxFps > 1000) g_cfg.maxFps = 1000;
+    g_cfg.maxFps = ResolveMaxFps(g_cfg.maxFps);
 }
 
 // ---------------------------------------------------------------------------
@@ -289,8 +293,7 @@ static void* PatchVtable(uintptr_t vtable, int index, void* newFn)
 // ---------------------------------------------------------------------------
 // State
 // ---------------------------------------------------------------------------
-static bool   g_active = true;       // runtime toggle (F10)
-static bool   g_keyPrev = false;
+static bool   g_active = true;       // smoothing on (Enabled, settings menu)
 static uint32_t g_tick = 0;          // incremented after each logic update while in game
 static double g_tickTime = 0.0;      // scheduled time of the current tick
 static double g_tickInterval = 40.0; // ms
@@ -660,8 +663,10 @@ static uintptr_t InventoryDragGrid()
     return grid;
 }
 
-static bool g_objKeyPrev = false;
 static void PauseUpdate();
+static void MenuPoll();
+static bool MenuBlocksGame();
+static void MenuDraw(void* canvas);
 static void PauseComposite(void* canvas);
 
 // After the logic update of every loop iteration.
@@ -683,25 +688,11 @@ static double g_nextFrameSlot = 0.0;   // time of the next frame on the steady f
 static float g_tickFrameAlpha = 0.0f;  // interpolation factor of the tick's own frame
 static void __fastcall Hook_Update(void* self, void* edx)
 {
-    Game_Update(self, edx);
+    // Settings menu open: the game's logic is paused (frames keep being drawn).
+    MenuPoll();
+    if (!MenuBlocksGame()) Game_Update(self, edx);
     LoadScreenRestoreMode();
     PauseUpdate();
-
-    bool key = (GetAsyncKeyState(g_cfg.toggleKey) & 0x8000) != 0;
-    if (key && !g_keyPrev) {
-        g_active = !g_active;
-        Log("smoothing %s\n", g_active ? "ON" : "OFF");
-        MessageBeep(g_active ? MB_OK : MB_ICONHAND);
-    }
-    g_keyPrev = key;
-
-    bool okey = (GetAsyncKeyState(VK_F11) & 0x8000) != 0;
-    if (okey && !g_objKeyPrev) {
-        g_cfg.objects = !g_cfg.objects;
-        Log("object interpolation %s\n", g_cfg.objects ? "ON" : "OFF");
-        MessageBeep(g_cfg.objects ? MB_OK : MB_ICONHAND);
-    }
-    g_objKeyPrev = okey;
 
     uintptr_t mision = *(uintptr_t*)addr::G_Mision;
     if (mision != g_lastMission) { ResetCams(); g_lastMission = mision; }
@@ -757,7 +748,7 @@ static void DumpBmp(const char* name, const uint16_t* src, int w, int h, int pit
 static void __fastcall Hook_Frame(void* self, void* edx, void* canvas)
 {
     NoteFrameSurface(canvas);
-    if (!g_inGame && !g_inMenu) { Game_Frame(self, edx, canvas); PauseComposite(canvas); return; }
+    if (!g_inGame && !g_inMenu) { Game_Frame(self, edx, canvas); PauseComposite(canvas); MenuDraw(canvas); return; }
     uintptr_t juego = (uintptr_t)self;
     uint8_t limited = At<uint8_t>(juego, addr::J_FpsLimited);
     At<uint8_t>(juego, addr::J_FpsLimited) = 0;   // we do the pacing
@@ -765,6 +756,7 @@ static void __fastcall Hook_Frame(void* self, void* edx, void* canvas)
     g_interpolating = true;
     Game_Frame(self, edx, canvas);
     PauseComposite(canvas);
+    MenuDraw(canvas);
     g_interpolating = false;
     At<uint8_t>(juego, addr::J_FpsLimited) = limited;
     g_statFrames++; StatFrameInterval();
@@ -1513,6 +1505,7 @@ static void DrawFrameExtra(uintptr_t juego, uintptr_t wm, float alpha)
     g_inExtraFrame = 1;
     Game_Frame((void*)juego, nullptr, canvas);
     PauseComposite(canvas);
+    MenuDraw(canvas);
     g_inExtraFrame = 0;
     g_interpolating = false;
     At<uint8_t>(juego, addr::J_FpsLimited) = limited;
@@ -1558,7 +1551,7 @@ static void __fastcall Hook_EndIter(void* canvas, void* edx)
             // Not while the middle button is held: rotating the view (Alt + middle
             // button in interiors) uses the mouse movement since the cursor's last
             // position, which these polls would consume.
-            if (!(GetAsyncKeyState(VK_MBUTTON) & 0x8000))
+            if (!(GetAsyncKeyState(VK_MBUTTON) & 0x8000) && !MenuBlocksGame())
                 ((void(*)())addr::PollCursorPos)();
 
             // Inventory: draw the dragged item where the cursor is now. The item
@@ -1694,8 +1687,10 @@ static WNDPROC g_origWndProc = nullptr;
 static HWND g_gameWnd = nullptr;
 
 static bool UiMapPoint(int& x, int& y);
+static bool MenuHandleMessage(UINT msg, WPARAM wp, LPARAM lp);
 static LRESULT CALLBACK PauseWndProc(HWND h, UINT msg, WPARAM wp, LPARAM lp)
 {
+    if (MenuHandleMessage(msg, wp, lp)) return 0;   // settings menu
     if (g_pauseScaleActive && g_pauseDW > 0 && msg >= WM_MOUSEFIRST && msg <= WM_MOUSELAST && msg != WM_MOUSEWHEEL) {
         int x = (short)LOWORD(lp), y = (short)HIWORD(lp);
         x = (int)((x - g_pauseDX) / g_pauseSX);
@@ -1718,7 +1713,7 @@ static BOOL CALLBACK FindGameWnd(HWND h, LPARAM)
 
 static void PauseUpdate()
 {
-    if (!g_origWndProc && ((g_cfg.hdMenus && g_cfg.pauseScale) || g_cfg.uiScale != 1.0f)) {
+    if (!g_origWndProc) {
         EnumThreadWindows(GetCurrentThreadId(), FindGameWnd, 0);
         if (g_gameWnd) {
             g_origWndProc = (WNDPROC)SetWindowLongA(g_gameWnd, GWL_WNDPROC, (LONG)(LONG_PTR)PauseWndProc);
@@ -1954,8 +1949,10 @@ namespace addr {
 static void DrawRealCursor(void* canvas);
 static int g_uiLastCount = 0;   // enlarged interface areas shown in the last frame
 static bool UiCursorMapped();
+static bool MenuBlocksGame();
 static void __fastcall Hook_DrawCursor(void* cur, void* edx, void* canvas)
 {
+    if (MenuBlocksGame()) return;   // settings menu: it draws its own arrow
     if (!g_pauseScaleActive && UiCursorMapped()) {
         // Enlarged interface: the game's cursor position is mapped into the original
         // interface area; draw the arrow at the real position.
@@ -2114,12 +2111,33 @@ static void PatchScaledPause()
     Log("scaled pause menu hooks: %s\n", ok ? "ok" : "FAILED");
 }
 
+static bool PatchScaledPauseOnce()
+{
+    static bool done = false;
+    if (!done) { done = true; PatchScaledPause(); }
+    return true;
+}
+
+// The cursor's set-position (0x81ea20) draws the arrow straight to the window
+// when the position changes (0x81e910, call at 0x81ea45); not while the settings
+// menu is open.
+namespace addr {
+    constexpr uintptr_t Site_CursorDrawNow = 0x81ea45;
+    constexpr uintptr_t CursorDrawNow = 0x81e910;   // thiscall(cursor)
+}
+static void __fastcall Hook_CursorDrawNow(void* cur, void* edx)
+{
+    if (MenuBlocksGame()) return;
+    ((PFN_Void0)addr::CursorDrawNow)(cur, edx);
+}
+
 static bool g_cursorReadHooks = false;
 static bool InstallCursorHooks()
 {
     if (g_cursorReadHooks) return true;
     g_cursorReadHooks = true;
     bool ok = PatchCallRel32(addr::Site_DrawCursorFrame, addr::DrawCursor, (void*)&Hook_DrawCursor);
+    ok &= PatchCallRel32(addr::Site_CursorDrawNow, addr::CursorDrawNow, (void*)&Hook_CursorDrawNow);
     {   // jmp rel32 at 0x791138 -> Hook_DrawCursor
         uint8_t* p = (uint8_t*)addr::Site_DrawCursorJmp;
         if (p[0] == 0xE9 && (uintptr_t)(addr::Site_DrawCursorJmp + 5 + *(int32_t*)(p + 1)) == addr::DrawCursor) {
@@ -3239,6 +3257,13 @@ static void PatchUiScale()
     Log("interface scaling hooks: %s (UIScale=%.2f)\n", ok ? "ok" : "FAILED", g_cfg.uiScale);
 }
 
+static bool PatchUiScaleOnce()
+{
+    static bool done = false;
+    if (!done) { done = true; PatchUiScale(); }
+    return true;
+}
+
 static void PatchCheats()
 {
     bool ok = PatchCallRel32(addr::Site_CheatMatch, addr::CheatMatch, (void*)&Hook_CheatMatch);
@@ -3461,6 +3486,8 @@ static DWORD WINAPI ProfilerThread(void*)
     return 0;
 }
 
+#include "settings_menu.h"
+
 static void Init()
 {
     g_mainThreadId = GetCurrentThreadId();
@@ -3504,11 +3531,14 @@ static void Init()
         if (GetPrivateProfileIntA(MOD_NAME, "Optimizations", 1, ini)) PatchPerformance();
     }
     if (g_cfg.hdMenus) PatchHDMenus();
-    if (g_cfg.hdMenus && g_cfg.pauseScale) PatchScaledPause();
+    if (g_cfg.hdMenus && g_cfg.pauseScale) PatchScaledPauseOnce();
     // Load the DirectDraw backend now, so cnc-ddraw can install its input
     // hooks before the game creates its DirectInput devices.
     LoadRealDDraw();
-    if (!g_cfg.enabled) return;
+    // The hooks are installed also with Enabled=0 (they then pass everything
+    // through), so smoothing can be switched on from the settings menu.
+    g_active = g_cfg.enabled;
+    InstallCursorHooks();   // the settings menu hides the game's arrow
 
     LARGE_INTEGER f;
     QueryPerformanceFrequency(&f);
@@ -3541,7 +3571,7 @@ static void Init()
         char ini[MAX_PATH];
         sprintf_s(ini, "%s\\" MOD_NAME ".ini", g_dir);
         if (GetPrivateProfileIntA(MOD_NAME, "Optimizations", 1, ini)) PatchMapCache();
-        if (g_cfg.uiScale != 1.0f) PatchUiScale();
+        if (g_cfg.uiScale != 1.0f) PatchUiScaleOnce();
     }
     Log("hooks installed\n");
 }

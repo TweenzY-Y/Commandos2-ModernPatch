@@ -32,7 +32,7 @@ body:
     id: without
     attributes:
       label: Does it also happen without the patch?
-      description: Press F10 in game to turn the patch off, or set `Enabled=0` in `Commandos2-ModernPatch.ini`.
+      description: Open the settings menu (Ctrl+Shift+F10) and turn Smoothing off, or set `Enabled=0` in `Commandos2-ModernPatch.ini`.
       options:
         - "No, only with the patch"
         - "Yes, also without the patch"

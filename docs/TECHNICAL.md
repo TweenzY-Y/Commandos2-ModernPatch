@@ -242,6 +242,24 @@ from `GONZOANDJON` (original, Legacy) to `PYROFOREVER`. The patch replaces the m
 to accept both in any letter case, and with `Cheats=1` sets the flag before every input
 event.
 
+## Settings menu (Ctrl+Shift+F10)
+
+The hotkey is polled in the update hook. While the menu is open the game's logic update
+(`0x7956f0`) is skipped, so the game is paused while frames (including extra frames) are
+still drawn; the window subclass consumes mouse and keyboard messages, and the logic stays
+paused until the keys/buttons used to close the menu are released. The panel is drawn with
+GDI into a 32-bit DIB only when it changes, converted to RGB565 and copied over every
+presented frame (after the pause composite); the rest of the screen is darkened, the game's arrow is not drawn
+(cursor draw hooks `0x793199`/`0x791138`, and the immediate draw on position
+changes `0x81e910` at `0x81ea45`; the extra frames do not poll the cursor) and the system arrow (drawn over black and white for alpha) is drawn at the mouse position.
+
+Every change is written to the ini immediately (`WritePrivateProfileString`, comments
+are kept). Options that can change while the game runs take effect at once (hooks for
+`UIScale`/`PauseMenuScale` are installed on demand); `HDResolution`, `HDMenus`,
+`CncDDraw`, `Optimizations`, `Debug` and `Profile` apply after a restart. The main hooks
+are installed also with `Enabled=0` (they pass everything through) so smoothing can be
+switched on from the menu.
+
 ## Configuration file
 
 `GetPrivateProfile*` does not understand a UTF-8 byte order mark: the section header
