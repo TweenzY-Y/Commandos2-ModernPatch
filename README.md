@@ -20,7 +20,7 @@ It also fixes several bugs of the original game at modern resolutions.
 | Full HD mission (Das Boot, Silent Killer) | Full-screen pause menu over the game in HD |
 |---|---|
 | ![Full HD mission](docs/images/mission.png) | ![Pause menu in HD](docs/images/pause.png) |
-| **3D interior in Full HD** | **Video options: pick 1280x720 (16:9) for the HD mode** |
+| **3D interior in Full HD** | **Video options (the HD mode is the last entry)** |
 | ![Interior in Full HD](docs/images/interior.png) | ![Video options](docs/images/options.png) |
 
 ## Features
@@ -36,7 +36,7 @@ It also fixes several bugs of the original game at modern resolutions.
 - Even frame pacing, also with a frame rate cap (`MaxFps`).
 
 **Full HD**
-- Full HD (or any) resolution for the game's HD video mode (originally 1280×720).
+- Full HD (or any) resolution as an extra video mode, after the game's own modes.
 - Full-screen pause menu in HD: the menu is scaled up over a sharp view of the game.
 - Larger interface in missions: the command panel, inventory (including dragged items)
   and the mission notebook are enlarged to match the resolution (`UIScale`), with
@@ -73,9 +73,9 @@ applies its changes in memory while the game runs.
     (SHA-256 `3645321656e05fab2cb91cff7d416152c9276d821ffef85cd0399bd4a15d1aaa`): all features.
   - **GOG version** `comm2.exe` (the original 2001 release, also the Steam "Legacy" folder,
     SHA-256 `f4ca330c86ad3fad293a26ba2d3425dbb69002494e6fb524e13936fcb60253be`): smoothing
-    (camera, units, cursor, inventory dragging), borderless full screen and the settings
-    menu. HD resolution, the HD pause menu, interface scaling, cheats and the performance
-    optimizations are not available in this version yet.
+    (camera, units, cursor, inventory dragging), borderless full screen, the settings
+    menu, the HD video mode and the high-resolution map fixes. The HD pause menu, interface
+    scaling, cheats and the performance optimizations are not available in this version yet.
 - Windows 10 or 11.
 
 ## Installation
@@ -86,9 +86,10 @@ applies its changes in memory while the game runs.
    You should end up with `ddraw.dll` and `Commandos2-ModernPatch.ini` next to
    `Comm2.exe`, plus a `Commandos2-ModernPatch` folder.
 3. Start the game normally (Steam or GOG Galaxy).
-4. For Full HD: in the game's video options choose **1280x720 (16:9)** — the patch turns
-   this mode into the resolution set in `HDResolution` (default 1920×1080). The label in
-   the menu keeps saying 1280x720.
+4. For Full HD: in the game's video options choose the last mode, e.g. **1920x1080 (16:9)**
+   — an extra mode added by the patch with the resolution set in `HDResolution` (default
+   1920×1080). The game's own modes are unchanged. Without the patch the game falls back
+   to its largest own mode.
 
 **Uninstall:** delete `ddraw.dll`, `Commandos2-ModernPatch.ini`, `Commandos2-ModernPatch.log`
 and the `Commandos2-ModernPatch` folder.
@@ -102,7 +103,7 @@ and the `Commandos2-ModernPatch` folder.
 | `Objects` | 1 | Smooth movement of soldiers, vehicles, projectiles |
 | `Mouse` | 1 | Smooth cursor and inventory dragging |
 | `Menus` | 1 | Smooth cursor in menus |
-| `HDResolution` | 1920x1080 | Resolution of the game's HD video mode |
+| `HDResolution` | 1920x1080 | Resolution of the extra HD video mode (last entry in the game's video options) |
 | `HDMenus` | 1 | Pause menu in the game resolution |
 | `PauseMenuScale` | 1 | 1 = stretched to full screen, 2 = enlarged 4:3, 0 = small and centred |
 | `UIScale` | 0 | Interface size in missions: 0 = automatic (screen height / 720), 1 = original, or a factor such as 2 |

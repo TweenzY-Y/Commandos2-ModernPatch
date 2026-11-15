@@ -77,8 +77,8 @@ static void MenuInit()
             "Automatic = screen height / 720.", 0, false,
             { { "0", "Automatic" }, { "1", "Original" }, { "1.25", "1.25x" }, { "1.5", "1.5x" },
               { "1.75", "1.75x" }, { "2", "2x" }, { "2.5", "2.5x" }, { "3", "3x" } });
-    MenuAdd("HDResolution", "HD resolution", "Used by the game's \"1280x720 (16:9)\" video mode - pick that "
-            "mode in the game's video options.", 0, true,
+    MenuAdd("HDResolution", "HD resolution", "Size of the extra HD video mode, the last one in the game's "
+            "video options. Applies the next time the mode is set (mission start or video options).", 0, false,
             { { "1280x720", "1280x720" }, { "1366x768", "1366x768" }, { "1600x900", "1600x900" },
               { "1920x1080", "1920x1080" }, { "2560x1080", "2560x1080" }, { "2560x1440", "2560x1440" },
               { "3440x1440", "3440x1440" }, { "3840x2160", "3840x2160" } });
@@ -101,7 +101,7 @@ static void MenuInit()
             1, true, { { "0", "Off" }, { "1", "On" } });
 #undef ONOFF
     if (g_gog) {   // not available in the GOG version yet
-        static const char* const na[] = { "HDResolution", "UIScale", "Cheats", "HDMenus", "PauseMenuScale", "Optimizations" };
+        static const char* const na[] = { "UIScale", "Cheats", "HDMenus", "PauseMenuScale", "Optimizations" };
         for (const char* k : na)
             for (size_t i = 0; i < g_menu.opts.size(); i++)
                 if (!strcmp(g_menu.opts[i].key, k)) { g_menu.opts.erase(g_menu.opts.begin() + i); break; }
@@ -153,6 +153,10 @@ static void MenuApply(const MenuOpt& o)
     else if (!strcmp(o.key, "Menus"))   g_cfg.menus = n != 0;
     else if (!strcmp(o.key, "Cheats"))  g_cfg.cheats = n != 0;
     else if (!strcmp(o.key, "MaxFps"))  g_cfg.maxFps = ResolveMaxFps(n);
+    else if (!strcmp(o.key, "HDResolution")) {
+        int w, h;
+        if (sscanf_s(v, "%dx%d", &w, &h) == 2 && w >= 640 && h >= 480 && w <= 7680 && h <= 4320) { g_cfg.hdW = w; g_cfg.hdH = h; }
+    }
     else if (!strcmp(o.key, "UIScale")) {
         g_cfg.uiScale = (float)atof(v);
         if (g_cfg.uiScale != 1.0f) PatchUiScaleOnce();

@@ -32,6 +32,12 @@ The GOG addresses were found by aligning the calls and data references of matchi
 functions, starting from the main loop and unique strings, and checked by comparing the
 disassembly.
 
+GOG build, HD mode and map fixes: size getters `0x4ecf30`/`0x4ecf80`/`0x4ecfd0`/`0x4ed010`/
+`0x4ed070`, clamps `0x4ecf12`/`0x4ec4cf`, `SetVideoMode` `0x4546e0` (six callers), label
+`0x476110` (lookup `0x414ef0` at `0x47614a`), steps `0x476374`, `0x476b7e`, `0x476d28`
+(previous) and `0x476c60`, `0x476deb` (next); map blitters `0x95ef80`/`0x95f7f0` (called at
+`0x953c15`/`0x953c22`), tile cache cap `0x9522ce`.
+
 ## Main loop
 
 `WinMain` loop (≈`0x4051f0`–`0x40536f`), one iteration =
@@ -141,9 +147,20 @@ the cursor movement since the tick during extra frames.
 
 ## Resolution
 
-Video mode index at options (`0xBCBADC`) `+0x54`; sizes come from switch tables in
-`0x413f20`–`0x4140b0` and `0x7b38c0`. Mode 3 (1280×720) immediates are patched to
-`HDResolution`. Menus are fixed 640×480 (`0x414020`/`0x414030`); `CMAMenuInGame`
+Video mode index at options (`0xBCBADC`) `+0x54`: 0–3 = 640×480, 800×600, 1024×768 and
+1280×720 (Steam) / 1280×1024 (GOG; its options screen offers only 0–2). The patch adds
+mode 4 with the `HDResolution` size: the size getters (by index `0x413f20`/`0x413f60`,
+current `0x413fa0`/`0x413fe0`/`0x414040` — the latter returns its output pointer) are
+replaced; the clamps to 3 in the setter (`0x415ba2`) and the options loader (`0x414d89`,
+key `MODOVIDEO`) are raised to 4 (the original game clamps a saved 4 back to 3). Video
+options screen (`CPantallaMenuOpcionesVideo`, mode at `+0xD4`): the previous/next steps
+(`0x7b3973`, `0x7b39d3`; inlined five times in the GOG build) call the patch instead;
+applying a mode builds the size from a 4-entry switch (0×0 otherwise) and calls
+`CJuego::SetVideoMode` (`0x7920d0`, from `0x402a76`/`0x7b391b`): 0×0 with mode 4 becomes
+the HD size. The label (`0x7b30d0`, called at `0x7b3951`) has no entry for mode 4: it is
+drawn as mode 0 with the resource text lookup (`0x8dfea0` at `0x7b3112`, fourcc key ->
+char*) answered with the HD label. Earlier versions replaced mode 3 on Steam: players who
+had it are moved to mode 4 once (`HDModeMigrated` in the ini). Menus are fixed 640×480 (`0x414020`/`0x414030`); `CMAMenuInGame`
 (`0xB176AC`) activation (`0x7ab1a9`, `0x7ab1b5`) is patched to keep the game resolution
 — its draw (`0x7aaec0`) and the menu layout (`0x7ae010`) already centre a 640×480 menu
 on larger screens.
@@ -274,7 +291,7 @@ changes `0x81e910` at `0x81ea45`; the extra frames do not poll the cursor) and t
 
 Every change is written to the ini immediately (`WritePrivateProfileString`, comments
 are kept). Options that can change while the game runs take effect at once (hooks for
-`UIScale`/`PauseMenuScale` are installed on demand); `HDResolution`, `HDMenus`,
+`UIScale`/`PauseMenuScale` are installed on demand; `HDResolution` applies when the video mode is next set); `HDMenus`,
 `CncDDraw`, `Optimizations`, `Debug` and `Profile` apply after a restart. The main hooks
 are installed also with `Enabled=0` (they pass everything through) so smoothing can be
 switched on from the menu.

@@ -670,6 +670,7 @@ static uintptr_t InventoryDragGrid()
 }
 
 static void PauseUpdate();
+static void MigrateHDMode();
 static void MenuPoll();
 static bool MenuBlocksGame();
 static void MenuDraw(void* canvas);
@@ -695,6 +696,8 @@ static float g_tickFrameAlpha = 0.0f;  // interpolation factor of the tick's own
 static void __fastcall Hook_Update(void* self, void* edx)
 {
     // Settings menu open: the game's logic is paused (frames keep being drawn).
+    static bool migrated = false;
+    if (!migrated) { migrated = true; MigrateHDMode(); }
     MenuPoll();
     if (!MenuBlocksGame()) Game_Update(self, edx);
     LoadScreenRestoreMode();
@@ -1633,9 +1636,7 @@ static void __fastcall Hook_EndIter(void* canvas, void* edx)
 
 // ---------------------------------------------------------------------------
 // ---------------------------------------------------------------------------
-// Resolution: video mode 3 ("1280x720 (16:9)", added by the Steam release) is
-// replaced by HDResolution from the ini. Mode index lives at options+0x54;
-// width/height come from switch tables in 0x413f20..0x4140b0 and 0x7b38c0.
+// Resolution: see PatchHDMode (an extra video mode with the HDResolution size).
 // ---------------------------------------------------------------------------
 static void PatchImm32(uintptr_t at, uint8_t opcode, uint32_t expect, uint32_t value)
 {
@@ -3430,31 +3431,201 @@ static void PatchHDMenus()
     Log("HD pause menu: %d/7 patched\n", ok);
 }
 
-static void PatchHDResolution()
-{
-    int w = g_cfg.hdW, h = g_cfg.hdH;
-    if (w <= 0 || h <= 0 || (w == 1280 && h == 720)) return;
-    struct { uintptr_t at; uint8_t op; bool height; } sites[] = {
-        { 0x413f45, 0xB8, false }, { 0x413f85, 0xB8, true },
-        { 0x413fc0, 0xB8, false }, { 0x414000, 0xB8, true },
-        { 0x414062, 0xBA, false }, { 0x414094, 0xBA, true },
-        { 0x7b38f2, 0xB8, false }, { 0x7b38f7, 0xB9, true },
+// ---------------------------------------------------------------------------
+// HD video mode: an extra entry (index 4) in the game's video modes, after
+// 640x480, 800x600, 1024x768 and 1280x720 (Steam) / 1280x1024 (GOG, not offered by
+// its options screen), with the size from HDResolution. The mode index lives at
+// options+0x54; the size getters (by index 0x413f20/0x413f60, current 0x413fa0 /
+// 0x413fe0 / 0x414040) are replaced. The setter (0x415b90) and the options loader
+// (0x414d89) clamp the index to 3: raised to 4. Without the patch the original game
+// clamps a saved 4 back to 3, so removing the patch is safe.
+// Video options screen (CPantallaMenuOpcionesVideo, mode at +0xD4): the previous /
+// next steps (Steam 0x7b3970 / 0x7b39d0; inlined five times in the GOG build) are
+// replaced by calls to MenuModeStep; applying the mode builds {w, h} from a
+// 4-entry switch (0 x 0 for other modes) and calls CJuego::SetVideoMode (Steam
+// 0x7920d0): those calls fill in the HD size. The label (0x7b30d0) has no entry for
+// mode 4: it is drawn as another mode with the text lookup (resource manager,
+// fourcc key) answered with our label.
+// ---------------------------------------------------------------------------
+namespace addr {
+    static uintptr_t G_Options      = 0xBCBADC;
+    static uintptr_t ModeWidthOf    = 0x413f20;   // stdcall(int mode)
+    static uintptr_t ModeHeightOf   = 0x413f60;   // stdcall(int mode)
+    static uintptr_t ModeWidth      = 0x413fa0;   // thiscall(options)
+    static uintptr_t ModeHeight     = 0x413fe0;   // thiscall(options)
+    static uintptr_t ModeSize       = 0x414040;   // thiscall(options, int out[2])
+    static uintptr_t SetterClamp    = 0x415ba2;   // cmp dword [ecx+0x54], 4 (+6: mov dword [ecx+0x54], 3)
+    static uintptr_t LoaderClamp    = 0x414d89;   // cmp dword [esi+0x54], 4 (+6: mov dword [esi+0x54], 3)
+    static uintptr_t SetVideoMode   = 0x7920d0;   // CJuego::SetVideoMode, thiscall(juego, mode*)
+    static uintptr_t Sites_SetVideoMode[6] = { 0x402a76, 0x7b391b, 0, 0, 0, 0 };
+    static uintptr_t LabelDraw      = 0x7b30d0;   // thiscall(screen, canvas)
+    static uintptr_t Site_LabelDraw = 0x7b3951;
+    static uintptr_t TextLookup     = 0x8dfea0;   // thiscall(resources, const char* key, int) -> char*
+    static uintptr_t Site_TextLookup = 0x7b3112;
+    // mode step code: start, end (the 'cmp [esi+0xD4], reg' after it), result in ecx?
+    struct StepSite { uintptr_t start, end; bool next, resultEcx; };
+    static StepSite StepSites[5] = {
+        { 0x7b3973, 0x7b3998, false, true }, { 0x7b39d3, 0x7b39f9, true, true },
     };
-    for (auto& s : sites) PatchImm32(s.at, s.op, s.height ? 720u : 1280u, s.height ? (uint32_t)h : (uint32_t)w);
+}
+static const int kModeIndexHD = 4;
+static int g_modeW[4] = { 640, 800, 1024, 1280 }, g_modeH[4] = { 480, 600, 768, 720 };
 
-    // Menu label (room up to 0xBB9938 in the original data).
-    char* label = (char*)0xBB98E8;
-    if (memcmp(label, "1280x720 (16:9)", 16) == 0) {
-        char text[32];
-        int g = w, a = h;
-        while (a) { int t = g % a; g = a; a = t; }
-        sprintf_s(text, "%dx%d (%d:%d)", w, h, w / g, h / g);
-        DWORD old;
-        VirtualProtect(label, 32, PAGE_READWRITE, &old);
-        strcpy_s(label, 32, text);
-        VirtualProtect(label, 32, old, &old);
+static int ModeW(int m) { return m == kModeIndexHD ? g_cfg.hdW : (m >= 0 && m < 4 ? g_modeW[m] : 640); }
+static int ModeH(int m) { return m == kModeIndexHD ? g_cfg.hdH : (m >= 0 && m < 4 ? g_modeH[m] : 480); }
+static int __stdcall Hook_ModeWidthOf(int m) { return ModeW(m); }
+static int __stdcall Hook_ModeHeightOf(int m) { return ModeH(m); }
+static int __fastcall Hook_ModeWidth(void* opt, void*) { return ModeW(At<int>((uintptr_t)opt, 0x54)); }
+static int __fastcall Hook_ModeHeight(void* opt, void*) { return ModeH(At<int>((uintptr_t)opt, 0x54)); }
+static int* __fastcall Hook_ModeSize(void* opt, void*, int* out)   // returns out (callers use eax)
+{
+    int m = At<int>((uintptr_t)opt, 0x54);
+    out[0] = ModeW(m); out[1] = ModeH(m);
+    return out;
+}
+
+// Modes offered by the options screen, in order (the GOG options screen does not
+// offer 1280x1024).
+static int __fastcall MenuModeStep(void* screen, int next)
+{
+    static const int steam[] = { 0, 1, 2, 3, kModeIndexHD }, gog[] = { 0, 1, 2, kModeIndexHD };
+    const int* order = g_gog ? gog : steam;
+    const int n = g_gog ? 4 : 5;
+    int m = At<int>((uintptr_t)screen, 0xd4), r = m;
+    if (next) { for (int i = 0; i < n; i++) if (order[i] > m) { r = order[i]; break; } }
+    else { for (int i = n - 1; i >= 0; i--) if (order[i] < m) { r = order[i]; break; } }
+    return r;
+}
+static int __fastcall MenuModePrev(void* screen, void*) { return MenuModeStep(screen, 0); }
+static int __fastcall MenuModeNext(void* screen, void*) { return MenuModeStep(screen, 1); }
+
+struct GameVideoMode { int w, h, bpp; };
+typedef int(__fastcall* PFN_SetVideoMode)(void* juego, void* edx, GameVideoMode* m);
+static int __fastcall Hook_SetVideoMode(void* juego, void* edx, GameVideoMode* m)
+{
+    uintptr_t opt = *(uintptr_t*)addr::G_Options;
+    if (m && m->w == 0 && m->h == 0 && opt && At<int>(opt, 0x54) == kModeIndexHD) {
+        m->w = g_cfg.hdW; m->h = g_cfg.hdH;
     }
-    Log("HD video mode set to %dx%d\n", w, h);
+    return ((PFN_SetVideoMode)addr::SetVideoMode)(juego, edx, m);
+}
+
+static char g_hdLabel[32];
+static bool g_hdLabelNow = false;
+typedef const char*(__fastcall* PFN_TextLookup)(void* self, void* edx, const char* key, int a);
+static const char* __fastcall Hook_TextLookup(void* self, void* edx, const char* key, int a)
+{
+    if (g_hdLabelNow) {
+        int g = g_cfg.hdW, b = g_cfg.hdH;
+        while (b) { int t = g % b; g = b; b = t; }
+        sprintf_s(g_hdLabel, "%dx%d (%d:%d)", g_cfg.hdW, g_cfg.hdH, g ? g_cfg.hdW / g : 0, g ? g_cfg.hdH / g : 0);
+        return g_hdLabel;
+    }
+    return ((PFN_TextLookup)addr::TextLookup)(self, edx, key, a);
+}
+static void __fastcall Hook_LabelDraw(void* screen, void* edx, void* canvas)
+{
+    int& m = At<int>((uintptr_t)screen, 0xd4);
+    if (m != kModeIndexHD) { ((PFN_Void1)addr::LabelDraw)(screen, edx, canvas); return; }
+    m = 0;
+    g_hdLabelNow = true;
+    ((PFN_Void1)addr::LabelDraw)(screen, edx, canvas);
+    g_hdLabelNow = false;
+    m = kModeIndexHD;
+}
+
+static bool PatchEntryJmp(uintptr_t at, uint8_t firstByte, void* target)
+{
+    if (!at || *(uint8_t*)at != firstByte) { Log("patch @%08X: unexpected bytes\n", (unsigned)at); return false; }
+    DWORD old;
+    VirtualProtect((void*)at, 5, PAGE_EXECUTE_READWRITE, &old);
+    *(uint8_t*)at = 0xE9;
+    *(int32_t*)(at + 1) = (int32_t)((uintptr_t)target - (at + 5));
+    VirtualProtect((void*)at, 5, old, &old);
+    FlushInstructionCache(GetCurrentProcess(), (void*)at, 5);
+    return true;
+}
+
+// cmp dword [reg+0x54], 4 / jl / mov dword [reg+0x54], 3  ->  5 / 4
+static bool PatchModeClamp(uintptr_t at)
+{
+    uint8_t* p = (uint8_t*)at;
+    if (!at || p[0] != 0x83 || p[2] != 0x54 || p[3] != 4 || p[6] != 0xC7 || p[8] != 0x54 || p[9] != 3) {
+        Log("mode clamp @%08X: unexpected bytes\n", (unsigned)at);
+        return false;
+    }
+    DWORD old;
+    VirtualProtect(p, 16, PAGE_EXECUTE_READWRITE, &old);
+    p[3] = kModeIndexHD + 1;
+    p[9] = kModeIndexHD;
+    VirtualProtect(p, 16, old, &old);
+    return true;
+}
+
+// Replaces a mode step with: mov ecx, esi; call MenuModePrev/Next; [mov ecx, eax]; jmp end
+static bool PatchModeStep(const addr::StepSite& s)
+{
+    if (!s.start) return true;
+    uint8_t* p = (uint8_t*)s.start;
+    const size_t len = s.end - s.start;
+    // expected: mov e?x, [esi+0xD4] at the start, cmp [esi+0xD4], e?x at the end
+    if (len < 12 || len > 64 || p[0] != 0x8B || p[2] != 0xD4 || *(uint8_t*)s.end != 0x39 || ((uint8_t*)s.end)[2] != 0xD4) {
+        Log("mode step @%08X: unexpected bytes\n", (unsigned)s.start);
+        return false;
+    }
+    uint8_t code[16];
+    size_t n = 0;
+    code[n++] = 0x8B; code[n++] = 0xCE;                       // mov ecx, esi
+    code[n++] = 0xE8;                                         // call
+    *(int32_t*)(code + n) = (int32_t)((uintptr_t)(s.next ? (void*)&MenuModeNext : (void*)&MenuModePrev) - (s.start + n + 4));
+    n += 4;
+    if (s.resultEcx) { code[n++] = 0x8B; code[n++] = 0xC8; }  // mov ecx, eax
+    code[n++] = 0xEB; code[n] = (uint8_t)(len - (n + 1)); n++; // jmp end
+    DWORD old;
+    VirtualProtect(p, len, PAGE_EXECUTE_READWRITE, &old);
+    memcpy(p, code, n);
+    VirtualProtect(p, len, old, &old);
+    FlushInstructionCache(GetCurrentProcess(), p, len);
+    return true;
+}
+
+static void PatchHDMode()
+{
+    int ok = 0, total = 0;
+    total += 5;
+    ok += PatchEntryJmp(addr::ModeWidthOf, 0x8B, (void*)&Hook_ModeWidthOf);
+    ok += PatchEntryJmp(addr::ModeHeightOf, 0x8B, (void*)&Hook_ModeHeightOf);
+    ok += PatchEntryJmp(addr::ModeWidth, 0x8B, (void*)&Hook_ModeWidth);
+    ok += PatchEntryJmp(addr::ModeHeight, 0x8B, (void*)&Hook_ModeHeight);
+    ok += PatchEntryJmp(addr::ModeSize, 0x8B, (void*)&Hook_ModeSize);
+    total += 2;
+    ok += PatchModeClamp(addr::SetterClamp);
+    ok += PatchModeClamp(addr::LoaderClamp);
+    for (uintptr_t site : addr::Sites_SetVideoMode)
+        if (site) { total++; ok += PatchCallRel32(site, addr::SetVideoMode, (void*)&Hook_SetVideoMode); }
+    total += 2;
+    ok += PatchCallRel32(addr::Site_LabelDraw, addr::LabelDraw, (void*)&Hook_LabelDraw);
+    ok += PatchCallRel32(addr::Site_TextLookup, addr::TextLookup, (void*)&Hook_TextLookup);
+    for (const auto& s : addr::StepSites)
+        if (s.start) { total++; ok += PatchModeStep(s); }
+    Log("HD video mode (%dx%d, index %d): %d/%d patched\n", g_cfg.hdW, g_cfg.hdH, kModeIndexHD, ok, total);
+}
+
+// Before this version mode 3 was replaced by the HD resolution on Steam: move
+// players who had chosen it to the new HD mode, once.
+static void MigrateHDMode()
+{
+    char ini[MAX_PATH];
+    sprintf_s(ini, "%s\\" MOD_NAME ".ini", g_dir);
+    if (g_gog || GetPrivateProfileIntA(MOD_NAME, "HDModeMigrated", 0, ini)) return;
+    uintptr_t opt = *(uintptr_t*)addr::G_Options;
+    if (!opt) return;
+    WritePrivateProfileStringA(MOD_NAME, "HDModeMigrated", "1", ini);
+    if (At<int>(opt, 0x54) == 3) {
+        typedef void(__fastcall* PFN_SetMode)(void* opt, void* edx, int m);
+        ((PFN_SetMode)0x415b90)((void*)opt, nullptr, kModeIndexHD);   // options setter (saves)
+        Log("video mode 3 (HD in earlier versions) moved to the new HD mode\n");
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -3585,16 +3756,35 @@ static void UseGogAddresses()
     Sites_CursorDrawInner[0] = 0x90ac69; Sites_CursorDrawInner[1] = 0x90ad5f; CursorDrawInner = 0x90ad70;
     IAT_GetCursorPos = 0xBAAC14;
     Sites_GetCursorPos[0] = 0; Sites_GetCursorPos[1] = 0; Thunk_GetCursorPos = 0;
-    // not ported yet: HD resolution, pause menu, interface scaling, cheats, map
-    // background fixes and cache, water rendering, inventory double click
+    // not ported yet: pause menu, interface scaling, cheats, map background cache,
+    // water rendering, inventory double click
     VT_MenuInGame = 0; Site_PauseWorld = 0; MisionDraw = 0; Site_PauseScreenSz = 0; Site_MenuLayoutSz = 0;
     Site_PauseLayout = 0; MenuLayout = 0; GetScreenSize = 0; SurfLock = 0; SurfUnlock = 0;
     Site_PauseBackdrop = 0; Blit = 0;
-    TileBlit = 0; TileBlitBlend = 0; Site_TileBlit = 0; Site_TileBlitBlend = 0; TileCacheColCap = 0;
     Site_CheatInput = 0; CheatInput = 0; Site_CheatMatch = 0; CheatMatch = 0;
     RastEdgeUV = 0; WaterSpanRow = 0; Site_MapDraw = 0; MapDraw = 0; VT_RootWindow = 0;
     InvMgrDraw = 0; Site_InvMgrDrawCall = 0; Site_InvMgrDrawJmp = 0; MissionDraw = 0; Site_InvMissionDraw = 0;
     Site_ManualDraw = 0; ManualDraw = 0;
+
+    // HD video mode (index 4, after 1280x1024 which the GOG options screen does not offer)
+    G_Options = 0xB58490;
+    ModeWidthOf = 0x4ecf30; ModeHeightOf = 0x4ecf80; ModeWidth = 0x4ecfd0; ModeHeight = 0x4ed010; ModeSize = 0x4ed070;
+    SetterClamp = 0x4ecf12; LoaderClamp = 0x4ec4cf;
+    SetVideoMode = 0x4546e0;
+    {
+        const uintptr_t t[] = { 0x402198, 0x476c18, 0x476cfd, 0x476dc0, 0x476e83, 0x476f3e };
+        for (int i = 0; i < 6; i++) Sites_SetVideoMode[i] = t[i];
+    }
+    LabelDraw = 0x476110; Site_LabelDraw = 0x476091; TextLookup = 0x414ef0; Site_TextLookup = 0x47614a;
+    StepSites[0] = { 0x476374, 0x47638b, false, false };
+    StepSites[1] = { 0x476b7e, 0x476b95, false, false };
+    StepSites[2] = { 0x476d28, 0x476d3d, false, false };
+    StepSites[3] = { 0x476c60, 0x476c7a, true, false };
+    StepSites[4] = { 0x476deb, 0x476e00, true, false };
+    g_modeH[3] = 1024;   // mode 3 is 1280x1024 in this build
+    // map background: tile-array overflow and tile cache cap (game bugs at high resolutions)
+    TileBlit = 0x95ef80; TileBlitBlend = 0x95f7f0; Site_TileBlit = 0x953c15; Site_TileBlitBlend = 0x953c22;
+    TileCacheColCap = 0x9522ce;
 
     Game_Update = (PFN_Void0)Update; Game_Frame = (PFN_Void1)Frame;
     Game_CanvasInit = (PFN_Int1)CanvasInit; Game_CanvasReset = (PFN_Void0)CanvasReset;
@@ -3641,16 +3831,16 @@ static void Init()
         // Not ported to this version yet.
         g_cfg.hdMenus = false; g_cfg.pauseScale = 0; g_cfg.uiScale = 1.0f; g_cfg.cheats = false;
         if (g_cfg.debug > 1) g_cfg.debug = 1;
-        Log("game version: GOG / original 2001 build (smoothing and settings menu; "
-            "HD resolution, pause menu, interface scaling, cheats and optimizations not available yet)\n");
+        Log("game version: GOG / original 2001 build (pause menu, interface scaling, cheats "
+            "and optimizations not available yet)\n");
     } else {
         Log("unexpected Comm2.exe build - hooks disabled\n");
         return;
     }
     g_seqAddr[0] = addr::SeqDraw_Continue; g_seqAddr[1] = addr::SeqDraw_DrawOnly; g_seqAddr[2] = addr::SeqDraw_Exit;
+    PatchHDMode();
+    PatchTileBlitOverflow();   // game bug fix, needed for resolutions above 1280x720
     if (!g_gog) {
-        PatchHDResolution();
-        PatchTileBlitOverflow();   // game bug fix, needed for resolutions above 1280x720
         PatchCheats();
         PatchInventoryDoubleClick();   // game bug fix
         char ini[MAX_PATH];
