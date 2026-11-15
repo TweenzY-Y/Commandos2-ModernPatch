@@ -199,34 +199,38 @@ static void WaitUntil(double targetMs)
 // ---------------------------------------------------------------------------
 namespace addr {
     // WinMain loop call sites
-    constexpr uintptr_t Site_Update    = 0x405239;  // call CJuego::Update       (0x7956f0)
-    constexpr uintptr_t Site_Frame     = 0x40529b;  // call CJuego::Frame(canvas) (0x792e10)
-    constexpr uintptr_t Site_EndIter   = 0x40535c;  // call CCanvas::Reset        (0x7cacd0)
+    static uintptr_t Site_Update    = 0x405239;  // call CJuego::Update       (0x7956f0)
+    static uintptr_t Site_Frame     = 0x40529b;  // call CJuego::Frame(canvas) (0x792e10)
+    static uintptr_t Site_EndIter   = 0x40535c;  // call CCanvas::Reset        (0x7cacd0)
 
-    constexpr uintptr_t Update         = 0x7956f0;
-    constexpr uintptr_t Frame          = 0x792e10;
-    constexpr uintptr_t CanvasInit     = 0x7caf00;  // thiscall(canvas, surfInfo*)
-    constexpr uintptr_t CanvasReset    = 0x7cacd0;  // thiscall(canvas)
-    constexpr uintptr_t VideoLock      = 0x7cde80;  // thiscall(video, lockInfo*)
-    constexpr uintptr_t VideoUnlock    = 0x7cdf00;  // thiscall(video, lockInfo*)
-    constexpr uintptr_t VideoPresent   = 0x7ce430;  // thiscall(video, vblankWaits)
+    static uintptr_t Update         = 0x7956f0;
+    static uintptr_t Frame          = 0x792e10;
+    static uintptr_t CanvasInit     = 0x7caf00;  // thiscall(canvas, surfInfo*)
+    static uintptr_t CanvasReset    = 0x7cacd0;  // thiscall(canvas)
+    static uintptr_t VideoLock      = 0x7cde80;  // thiscall(video, lockInfo*)
+    static uintptr_t VideoUnlock    = 0x7cdf00;  // thiscall(video, lockInfo*)
+    static uintptr_t VideoPresent   = 0x7ce430;  // thiscall(video, vblankWaits)
 
     // WinMain stack frame layout (offsets from WinMain's esp inside the loop)
-    constexpr int WM_LockInfo  = 0x14;
-    constexpr int WM_NoDraw    = 0x1b;
-    constexpr int WM_Canvas    = 0x44;
-    constexpr int WM_Video     = 0x5c;
-    constexpr int WM_HaveVideo = 0x68;
-    constexpr int WM_SurfInfo  = 0xe8;
+    static int WM_LockInfo  = 0x14;
+    static int WM_NoDraw    = 0x1b;
+    static int WM_Canvas    = 0x44;
+    static int WM_Video     = 0x5c;
+    static int WM_HaveVideo = 0x68;
+    static int WM_SurfInfo  = 0xe8;
 
     // Globals
-    constexpr uintptr_t G_Juego        = 0xBCBAD4;  // CJuego*
-    constexpr uintptr_t G_Mision       = 0xBD57EC;  // current mission*
-    constexpr uintptr_t G_FrameAdapt   = 0xBB432C;  // byte: adaptive frame skipping active
-    constexpr uintptr_t G_DrewFrame    = 0xBB432D;  // byte: this iteration was drawn
-    constexpr uintptr_t G_SkipPresent  = 0xBD57E4;  // byte
+    static uintptr_t G_Juego        = 0xBCBAD4;  // CJuego*
+    static uintptr_t G_Mision       = 0xBD57EC;  // current mission*
+    static uintptr_t G_FrameAdapt   = 0xBB432C;  // byte: adaptive frame skipping active
+    static uintptr_t G_DrewFrame    = 0xBB432D;  // byte: this iteration was drawn
+    static uintptr_t G_SkipPresent  = 0xBD57E4;  // byte
     constexpr float     DefaultFps     = 25.0f;
-    constexpr uintptr_t PollCursorPos  = 0x402e00;  // cdecl void(): cursor sprite <- system cursor
+    static uintptr_t PollCursorPos  = 0x402e00;  // cdecl void(): cursor sprite <- system cursor
+    static uintptr_t GetScreen      = 0x790f40;  // CJuego::GetScreen, thiscall() -> current screen (CMA*)
+    static uintptr_t VT_Briefing    = 0xB1333C;  // CMABriefing
+    static uintptr_t VT_BriefingRed = 0xB133EC;  // CMABriefingRed
+    static uintptr_t G_Video        = 0xC15BDC;  // video object*
 
     // CJuego fields
     constexpr int J_State        = 0x2c;   // current screen index
@@ -237,7 +241,7 @@ namespace addr {
     constexpr int M_TickCount    = 0x5a4;
 
     // CVentanaVisorMundo (world viewer window)
-    constexpr uintptr_t VT_VisorMundo = 0xAF37C4;
+    static uintptr_t VT_VisorMundo = 0xAF37C4;
     constexpr int VT_VisorMundo_Draw  = 2;      // thiscall(canvas) ret 4
     constexpr int VM_Camera           = 0xdc;
     // Camera object
@@ -267,6 +271,7 @@ static PFN_Void1 Game_VisorDraw    = nullptr;  // original vtable entry
 // ---------------------------------------------------------------------------
 static bool PatchCallRel32(uintptr_t site, uintptr_t expectedTarget, void* newTarget)
 {
+    if (!site || !expectedTarget) { Log("patch: address not known for this game version\n"); return false; }
     uint8_t* p = (uint8_t*)site;
     if (p[0] != 0xE8) { Log("patch @%08X: not a call (%02X)\n", (unsigned)site, p[0]); return false; }
     uintptr_t cur = site + 5 + *(int32_t*)(p + 1);
@@ -293,6 +298,7 @@ static void* PatchVtable(uintptr_t vtable, int index, void* newFn)
 // ---------------------------------------------------------------------------
 // State
 // ---------------------------------------------------------------------------
+static bool   g_gog = false;        // GOG / original 2001 build (see UseGogAddresses)
 static bool   g_active = true;       // smoothing on (Enabled, settings menu)
 static uint32_t g_tick = 0;          // incremented after each logic update while in game
 static double g_tickTime = 0.0;      // scheduled time of the current tick
@@ -348,7 +354,7 @@ static CamState* GetCamState(uintptr_t cam)
 static uintptr_t CurrentScreen(uintptr_t juego)
 {
     typedef uintptr_t(__fastcall* PFN_GetScreen)(void* self, void* edx);
-    return ((PFN_GetScreen)0x790f40)((void*)juego, nullptr);
+    return ((PFN_GetScreen)addr::GetScreen)((void*)juego, nullptr);
 }
 
 // Screens whose animations advance per draw call and are not handled yet:
@@ -357,7 +363,7 @@ static bool IsExcludedScreen(uintptr_t screen)
 {
     if (!screen) return true;
     uintptr_t vt = *(uintptr_t*)screen;
-    return vt == 0xB1333C /* CMABriefing */ || vt == 0xB133EC /* CMABriefingRed */;
+    return vt == addr::VT_Briefing || vt == addr::VT_BriefingRed;
 }
 
 // Menus, pause menu etc.: any stable screen other than mission/inventory.
@@ -607,9 +613,9 @@ static void DiagWindowTrees();
 // at +0xA0 and draws it at +0xA4/+0xA8 (= mouse - grab offset, set per tick by
 // the grid's mouse-move handler at 0x93081b).
 namespace addr {
-    constexpr uintptr_t G_InventarioMgr = 0xBD57F0;
+    static uintptr_t G_InventarioMgr = 0xBD57F0;
     constexpr int INV_Grid = 0x4c;
-    constexpr uintptr_t VT_GridInv = 0xB360B4;       // CVentanaCuadriculaInv
+    static uintptr_t VT_GridInv = 0xB360B4;       // CVentanaCuadriculaInv
     constexpr int GRID_DragItem = 0xa0;
     constexpr int GRID_DragX = 0xa4;
     constexpr int GRID_DragY = 0xa8;
@@ -705,7 +711,7 @@ static void __fastcall Hook_Update(void* self, void* edx)
             j ? At<int>(j, addr::J_State) : -1, j ? At<int>(j, addr::J_Transition) : -1);
     }
     if (g_cfg.debug >= 2) DiagPoll(inGame);
-    DiagWindowTrees();
+    if (!g_gog) DiagWindowTrees();
 
     bool inMenu = !inGame && g_active && g_cfg.menus && IsMenuScreen();
     if (inMenu != g_inMenu) {
@@ -1208,12 +1214,13 @@ static void DiagWindowTrees()
 // ---------------------------------------------------------------------------
 
 namespace addr {
-    constexpr uintptr_t SeqDraw          = 0x92a5f0;
-    constexpr uintptr_t SeqDraw_Continue = 0x92a5fd;  // after the prologue + 'je exit'
-    constexpr uintptr_t SeqDraw_DrawOnly = 0x92a673;  // expects esi=this, [esp]=edi, [esp+4]=esi
-    constexpr uintptr_t SeqDraw_Exit     = 0x92a6cb;  // pop esi; ret 4
+    static uintptr_t SeqDraw          = 0x92a5f0;
+    static uintptr_t SeqDraw_Continue = 0x92a5fd;  // after the prologue + 'je exit'
+    static uintptr_t SeqDraw_DrawOnly = 0x92a673;  // expects esi=this, [esp]=edi, [esp+4]=esi
+    static uintptr_t SeqDraw_Exit     = 0x92a6cb;  // pop esi; ret 4
 }
 
+static uintptr_t g_seqAddr[3];   // continue, draw-only tail, exit (set in Init)
 __declspec(naked) static void Stub_SeqDraw()
 {
     __asm {
@@ -1223,15 +1230,32 @@ __declspec(naked) static void Stub_SeqDraw()
         je exit_
         cmp byte ptr [g_inExtraFrame], 0
         jne extra_
-        mov eax, 0x0092A5FD
-        jmp eax
+        jmp dword ptr [g_seqAddr]
     extra_:
         push edi
-        mov eax, 0x0092A673
-        jmp eax
+        jmp dword ptr [g_seqAddr + 4]
     exit_:
-        mov eax, 0x0092A6CB
-        jmp eax
+        jmp dword ptr [g_seqAddr + 8]
+    }
+}
+
+// GOG build: push esi; mov esi, ecx; push edi; mov al, [esi+0x44]; test al, al; je exit
+// (exit pops edi and esi); the draw-only tail expects both pushed.
+__declspec(naked) static void Stub_SeqDrawGog()
+{
+    __asm {
+        push esi
+        mov esi, ecx
+        push edi
+        cmp byte ptr [esi + 0x44], 0
+        je exit_
+        cmp byte ptr [g_inExtraFrame], 0
+        jne extra_
+        jmp dword ptr [g_seqAddr]
+    extra_:
+        jmp dword ptr [g_seqAddr + 4]
+    exit_:
+        jmp dword ptr [g_seqAddr + 8]
     }
 }
 
@@ -1241,8 +1265,8 @@ __declspec(naked) static void Stub_SeqDraw()
 // in extra frames so the cursor animates at the original rate.
 // ---------------------------------------------------------------------------
 namespace addr {
-    constexpr uintptr_t Site_CursorAnimTick = 0x44bd10;
-    constexpr uintptr_t CursorAnimTick      = 0x437d30;
+    static uintptr_t Site_CursorAnimTick = 0x44bd10;
+    static uintptr_t CursorAnimTick      = 0x437d30;
 }
 static PFN_Void0 Game_CursorAnimTick = (PFN_Void0)addr::CursorAnimTick;
 
@@ -1255,8 +1279,8 @@ static void __fastcall Hook_CursorAnimTick(void* self, void* edx)
 // advances the effect (0x92fd70: next frame of the sweep, then fade-out) and draws
 // it (0x92fe20) on every draw. Advance it only in tick frames.
 namespace addr {
-    constexpr uintptr_t Site_InvEffectStep = 0x8a01b9;
-    constexpr uintptr_t InvEffectStep      = 0x92fd70;
+    static uintptr_t Site_InvEffectStep = 0x8a01b9;
+    static uintptr_t InvEffectStep      = 0x92fd70;
 }
 static void* g_invEffectArg = nullptr;
 static bool g_invSecondPass = false;   // interface scaling draws the inventory item twice
@@ -1273,9 +1297,10 @@ static void __fastcall Hook_InvEffectStep(void* self, void* edx, void* arg)
 // made by 0x92fbc0 (thiscall(item image, offset, colour, level) -> new image, no
 // other side effects); phase 0: (offset, [0xBC19C4], -1), phase 1: (0, 0, level).
 namespace addr {
-    constexpr uintptr_t Site_InvEffectDraw = 0x8a01d3;
-    constexpr uintptr_t InvEffectDraw      = 0x92fe20;
-    constexpr uintptr_t InvEffectFrame     = 0x92fbc0;
+    static uintptr_t Site_InvEffectDraw = 0x8a01d3;
+    static uintptr_t InvEffectDraw      = 0x92fe20;
+    static uintptr_t InvEffectFrame     = 0x92fbc0;
+    static uintptr_t G_ShineColour      = 0xBC19C4;   // uint16 sweep colour
 }
 typedef void(__fastcall* PFN_InvEffectDraw)(void* self, void* edx, void* canvas, int x, int y);
 typedef void*(__fastcall* PFN_InvEffectFrame)(void* self, void* edx, void* item, int offset, int colour, int level);
@@ -1293,7 +1318,7 @@ static void __fastcall Hook_InvEffectDraw(void* self, void* edx, void* canvas, i
     if (phase == 0 && savedOffset >= 6) {
         int offset = savedOffset - 6 + (int)(6.0f * a + 0.5f);
         frame = ((PFN_InvEffectFrame)addr::InvEffectFrame)(self, nullptr, g_invEffectArg, offset,
-                                                           *(uint16_t*)0xBC19C4, -1);
+                                                           *(uint16_t*)addr::G_ShineColour, -1);
         if (frame) At<int>(e, 8) = offset + 6;
     } else if (phase == 1 && At<int>(e, 0xc) < 0x20) {
         int level = At<int>(e, 0xc) + 4 - (int)(4.0f * a + 0.5f);
@@ -1322,8 +1347,8 @@ static void __fastcall Hook_InvEffectDraw(void* self, void* edx, void* canvas, i
 #include <unordered_map>
 
 namespace addr {
-    constexpr uintptr_t ObjProject = 0x7f7240;
-    constexpr uintptr_t Site_ObjProject[] = { 0x7e6960, 0x7e8d80, 0x80382f };
+    static uintptr_t ObjProject = 0x7f7240;
+    static uintptr_t Site_ObjProject[] = { 0x7e6960, 0x7e8d80, 0x80382f };
     constexpr int OBJ_Pos = 0x14;
 }
 
@@ -1344,7 +1369,7 @@ static int g_statShared = 0, g_statPolygon = 0;
 static void ResetObjs() { g_objs.clear(); }
 
 namespace addr {
-    constexpr uintptr_t VT_VisualPolygon = 0xAF7024;  // CVisualGraficoPolygon
+    static uintptr_t VT_VisualPolygon = 0xAF7024;  // CVisualGraficoPolygon
     constexpr int OBJ_Visuals = 0x8c;                 // CVisual** array
     constexpr int OBJ_VisualCount = 0x90;
 }
@@ -1463,8 +1488,8 @@ static void __fastcall Hook_ObjProject(void* self, void* edx, uint32_t a1, uint3
 // original rate.
 // ---------------------------------------------------------------------------
 namespace addr {
-    constexpr uintptr_t TextFieldDraw = 0x87f090;   // thiscall(field, canvas) ret 4
-    constexpr uintptr_t Sites_TextFieldDraw[] = { 0x79c057, 0x7b7ecf, 0x7ba3de, 0x7bb1f8, 0x87f19a };
+    static uintptr_t TextFieldDraw = 0x87f090;   // thiscall(field, canvas) ret 4
+    static uintptr_t Sites_TextFieldDraw[] = { 0x79c057, 0x7b7ecf, 0x7ba3de, 0x7bb1f8, 0x87f19a, 0 };
 }
 static void __fastcall Hook_TextFieldDraw(void* self, void* edx, void* canvas)
 {
@@ -1474,6 +1499,7 @@ static void __fastcall Hook_TextFieldDraw(void* self, void* edx, void* canvas)
 
 static bool PatchJmp(uintptr_t at, const uint8_t* expect, size_t n, void* target)
 {
+    if (!at) return false;
     if (memcmp((void*)at, expect, n) != 0) { Log("patch @%08X: unexpected bytes\n", (unsigned)at); return false; }
     DWORD old;
     VirtualProtect((void*)at, 5, PAGE_EXECUTE_READWRITE, &old);
@@ -1637,22 +1663,22 @@ static void PatchImm32(uintptr_t at, uint8_t opcode, uint32_t expect, uint32_t v
 // scaled over the whole screen. GetCursorPos is mapped back to menu space.
 // ---------------------------------------------------------------------------
 namespace addr {
-    constexpr uintptr_t VT_MenuInGame       = 0xB176AC;
-    constexpr uintptr_t Site_PauseWorld     = 0x7aaed8;  // call MisionDraw (0x44bcf0) in CMAMenuInGame::Draw
-    constexpr uintptr_t MisionDraw          = 0x44bcf0;
-    constexpr uintptr_t Site_PauseScreenSz  = 0x7aaee8;  // call GetScreenSize (0x8ed510) in CMAMenuInGame::Draw
-    constexpr uintptr_t Site_MenuLayoutSz   = 0x7ae026;  // call GetScreenSize in menu layout (0x7ae010)
-    constexpr uintptr_t Site_PauseLayout    = 0x7ab077;  // call 0x7ae010 from CMAMenuInGame
-    constexpr uintptr_t MenuLayout          = 0x7ae010;
-    constexpr uintptr_t GetScreenSize       = 0x8ed510;  // thiscall(video, int out[2+])
-    constexpr uintptr_t SurfLock            = 0x81d390;  // thiscall(surface, info**) -> 0 ok
-    constexpr uintptr_t SurfUnlock          = 0x81d3c0;  // thiscall(surface, info**)
-    constexpr uintptr_t IAT_GetCursorPos    = 0xC19DF8;
+    static uintptr_t VT_MenuInGame       = 0xB176AC;
+    static uintptr_t Site_PauseWorld     = 0x7aaed8;  // call MisionDraw (0x44bcf0) in CMAMenuInGame::Draw
+    static uintptr_t MisionDraw          = 0x44bcf0;
+    static uintptr_t Site_PauseScreenSz  = 0x7aaee8;  // call GetScreenSize (0x8ed510) in CMAMenuInGame::Draw
+    static uintptr_t Site_MenuLayoutSz   = 0x7ae026;  // call GetScreenSize in menu layout (0x7ae010)
+    static uintptr_t Site_PauseLayout    = 0x7ab077;  // call 0x7ae010 from CMAMenuInGame
+    static uintptr_t MenuLayout          = 0x7ae010;
+    static uintptr_t GetScreenSize       = 0x8ed510;  // thiscall(video, int out[2+])
+    static uintptr_t SurfLock            = 0x81d390;  // thiscall(surface, info**) -> 0 ok
+    static uintptr_t SurfUnlock          = 0x81d3c0;  // thiscall(surface, info**)
+    static uintptr_t IAT_GetCursorPos    = 0xC19DF8;
     // call [IAT] sites that feed menu/game logic. 0x402e41 (arrow sprite poll) is
     // deliberately left alone: the arrow must stay at the real mouse position,
     // also when the game draws it immediately on mouse moves (0x81e830).
-    constexpr uintptr_t Sites_GetCursorPos[] = { 0x8e1567, 0x8ed9f5 };
-    constexpr uintptr_t Thunk_GetCursorPos  = 0x4067dc;                             // jmp [IAT]
+    static uintptr_t Sites_GetCursorPos[] = { 0x8e1567, 0x8ed9f5 };
+    static uintptr_t Thunk_GetCursorPos  = 0x4067dc;                             // jmp [IAT]
 }
 
 static const uint16_t kPauseKey = 0xF81F; // magenta: "no menu pixel here"
@@ -1830,8 +1856,8 @@ static bool g_backdropThisFrame = false;
 typedef void(__fastcall* PFN_Blit)(void* canvas, void* edx, uint32_t a1, uint32_t a2, uint32_t a3, uint32_t a4,
     uint32_t a5, uint32_t a6, uint32_t a7, uint32_t a8, uint32_t a9, uint32_t a10);
 namespace addr {
-    constexpr uintptr_t Site_PauseBackdrop = 0x7aaf61;  // call Blit (0x7d3fe0) in CMAMenuInGame::Draw
-    constexpr uintptr_t Blit = 0x7d3fe0;
+    static uintptr_t Site_PauseBackdrop = 0x7aaf61;  // call Blit (0x7d3fe0) in CMAMenuInGame::Draw
+    static uintptr_t Blit = 0x7d3fe0;
 }
 
 static void FillCorner(uintptr_t surf, uint16_t c)
@@ -1942,9 +1968,9 @@ static inline uint16_t BlendBackdrop(uint16_t world, uint16_t color, uint32_t in
 // The arrow is not drawn into the menu layer (its soft edges would mix with
 // the key colour); it is drawn after compositing at the real mouse position.
 namespace addr {
-    constexpr uintptr_t DrawCursor = 0x81e990;        // thiscall(cursor, canvas) ret 4
-    constexpr uintptr_t Site_DrawCursorFrame = 0x793199;  // call in CJuego::Frame
-    constexpr uintptr_t Site_DrawCursorJmp = 0x791138;    // jmp in CJuego::DrawCursor
+    static uintptr_t DrawCursor = 0x81e990;        // thiscall(cursor, canvas) ret 4
+    static uintptr_t Site_DrawCursorFrame = 0x793199;  // call in CJuego::Frame
+    static uintptr_t Site_DrawCursorJmp = 0x791138;    // jmp in CJuego::DrawCursor
 }
 static void DrawRealCursor(void* canvas);
 static int g_uiLastCount = 0;   // enlarged interface areas shown in the last frame
@@ -2085,6 +2111,7 @@ static BOOL WINAPI Hook_GetCursorPos(POINT* p)
 
 static void PatchIndirectToDirect(uintptr_t at, uint8_t modrm, uint8_t newOp, void* target)
 {
+    if (!at) return;
     uint8_t* p = (uint8_t*)at;
     if (p[0] != 0xFF || p[1] != modrm || *(uint32_t*)(p + 2) != addr::IAT_GetCursorPos) {
         Log("cursor patch @%08X: unexpected bytes\n", (unsigned)at);
@@ -2122,13 +2149,25 @@ static bool PatchScaledPauseOnce()
 // when the position changes (0x81e910, call at 0x81ea45); not while the settings
 // menu is open.
 namespace addr {
-    constexpr uintptr_t Site_CursorDrawNow = 0x81ea45;
-    constexpr uintptr_t CursorDrawNow = 0x81e910;   // thiscall(cursor)
+    static uintptr_t Site_CursorDrawNow = 0x81ea45;
+    static uintptr_t CursorDrawNow = 0x81e910;   // thiscall(cursor)
 }
 static void __fastcall Hook_CursorDrawNow(void* cur, void* edx)
 {
     if (MenuBlocksGame()) return;
     ((PFN_Void0)addr::CursorDrawNow)(cur, edx);
+}
+// GOG build: the position-change paths call the inner draw (0x90ad70, thiscall
+// with 3 arguments) directly.
+namespace addr {
+    static uintptr_t Sites_CursorDrawInner[2] = { 0, 0 };
+    static uintptr_t CursorDrawInner = 0;
+}
+typedef void(__fastcall* PFN_Void3)(void* self, void* edx, void* a1, void* a2, void* a3);
+static void __fastcall Hook_CursorDrawInner(void* cur, void* edx, void* a1, void* a2, void* a3)
+{
+    if (MenuBlocksGame()) return;
+    ((PFN_Void3)addr::CursorDrawInner)(cur, edx, a1, a2, a3);
 }
 
 static bool g_cursorReadHooks = false;
@@ -2137,10 +2176,14 @@ static bool InstallCursorHooks()
     if (g_cursorReadHooks) return true;
     g_cursorReadHooks = true;
     bool ok = PatchCallRel32(addr::Site_DrawCursorFrame, addr::DrawCursor, (void*)&Hook_DrawCursor);
-    ok &= PatchCallRel32(addr::Site_CursorDrawNow, addr::CursorDrawNow, (void*)&Hook_CursorDrawNow);
-    {   // jmp rel32 at 0x791138 -> Hook_DrawCursor
+    if (addr::Site_CursorDrawNow)
+        ok &= PatchCallRel32(addr::Site_CursorDrawNow, addr::CursorDrawNow, (void*)&Hook_CursorDrawNow);
+    for (uintptr_t site : addr::Sites_CursorDrawInner)
+        if (site) ok &= PatchCallRel32(site, addr::CursorDrawInner, (void*)&Hook_CursorDrawInner);
+    {   // jmp (Steam) / call (GOG) rel32 in CJuego::DrawCursor -> Hook_DrawCursor
         uint8_t* p = (uint8_t*)addr::Site_DrawCursorJmp;
-        if (p[0] == 0xE9 && (uintptr_t)(addr::Site_DrawCursorJmp + 5 + *(int32_t*)(p + 1)) == addr::DrawCursor) {
+        if ((p[0] == 0xE9 || p[0] == 0xE8) &&
+            (uintptr_t)(addr::Site_DrawCursorJmp + 5 + *(int32_t*)(p + 1)) == addr::DrawCursor) {
             DWORD old; VirtualProtect(p, 5, PAGE_EXECUTE_READWRITE, &old);
             *(int32_t*)(p + 1) = (int32_t)((uintptr_t)&Hook_DrawCursor - (addr::Site_DrawCursorJmp + 5));
             VirtualProtect(p, 5, old, &old);
@@ -2166,11 +2209,11 @@ static bool InstallCursorHooks()
 // world unit (srcX/srcY are world units). 'extra' is passed through unchanged.
 // ---------------------------------------------------------------------------
 namespace addr {
-    constexpr uintptr_t TileBlit       = 0x856880;
-    constexpr uintptr_t TileBlitBlend  = 0x856ea0;
-    constexpr uintptr_t Site_TileBlit      = 0x857851;
-    constexpr uintptr_t Site_TileBlitBlend = 0x85788f;
-    constexpr uintptr_t TileCacheColCap    = 0x8587ce;
+    static uintptr_t TileBlit       = 0x856880;
+    static uintptr_t TileBlitBlend  = 0x856ea0;
+    static uintptr_t Site_TileBlit      = 0x857851;
+    static uintptr_t Site_TileBlitBlend = 0x85788f;
+    static uintptr_t TileCacheColCap    = 0x8587ce;
 }
 typedef uint32_t(__fastcall* PFN_TileBlit)(void* self, void* edx, uint16_t* dst, int pitch,
     float srcX, float srcY, int w, int h, uint32_t extra);
@@ -2287,10 +2330,10 @@ static uint32_t __fastcall Hook_TileBlitBlend(void* self, void* edx, uint16_t* d
 // flag before every input event, so no password is needed.
 // ---------------------------------------------------------------------------
 namespace addr {
-    constexpr uintptr_t Site_CheatInput = 0x4477ae;
-    constexpr uintptr_t CheatInput      = 0x4a87b0;
-    constexpr uintptr_t Site_CheatMatch = 0x4a8826;
-    constexpr uintptr_t CheatMatch      = 0x5ca430;
+    static uintptr_t Site_CheatInput = 0x4477ae;
+    static uintptr_t CheatInput      = 0x4a87b0;
+    static uintptr_t Site_CheatMatch = 0x4a8826;
+    static uintptr_t CheatMatch      = 0x5ca430;
     constexpr int J_CheatsOn            = 0xea;
 }
 static const char* const kCheatWords[] = { "PYROFOREVER", "GONZOANDJON" };
@@ -2335,7 +2378,7 @@ static bool __fastcall Hook_CheatInput(void* self, void* edx, void* msg)
 // Edge record: +4 y, +8 u, +0xC v (floats).
 // ---------------------------------------------------------------------------
 namespace addr {
-    constexpr uintptr_t RastEdgeUV = 0x839840;
+    static uintptr_t RastEdgeUV = 0x839840;
 }
 static inline int32_t TruncLow32(float f)
 {
@@ -2373,7 +2416,7 @@ static void __fastcall Fast_RastEdgeUV(uint8_t* self, void*, uint32_t y, int32_t
 // Literal C translation of the original (same results, including its quirks),
 // with the pixel loop kept in registers instead of global variables.
 namespace addr {
-    constexpr uintptr_t WaterSpanRow = 0x83a2d0;
+    static uintptr_t WaterSpanRow = 0x83a2d0;
 }
 #pragma pack(push, 1)
 struct WaterSpan { uint16_t poly; int16_t x0, x1; };
@@ -2604,8 +2647,8 @@ static bool IsGameCode(uint32_t a) { return a >= 0x401000 && a < 0xAE8000; }
 // +0x14 h.
 // ---------------------------------------------------------------------------
 namespace addr {
-    constexpr uintptr_t Site_MapDraw = 0x7eaeab;
-    constexpr uintptr_t MapDraw      = 0x7e7de0;
+    static uintptr_t Site_MapDraw = 0x7eaeab;
+    static uintptr_t MapDraw      = 0x7e7de0;
 }
 struct BgCache {
     uintptr_t cam = 0;
@@ -2722,7 +2765,7 @@ static void PatchInventoryDoubleClick()
 // mapped back to the original area; the arrow is drawn at the real position.
 // ---------------------------------------------------------------------------
 namespace addr {
-    constexpr uintptr_t VT_RootWindow = 0xAF2E94;   // V_CVentana
+    static uintptr_t VT_RootWindow = 0xAF2E94;   // V_CVentana
 }
 static PFN_Void1 g_rootWindowDraw = nullptr;
 
@@ -3004,11 +3047,11 @@ static void __fastcall Hook_RootWindowDraw(void* self, void* edx, void* canvas)
 // what it drew there: the areas to their enlarged places, the box enlarged
 // around the real mouse position.
 namespace addr {
-    constexpr uintptr_t InvMgrDraw = 0x8a5940;
-    constexpr uintptr_t Site_InvMgrDrawCall = 0x7a7678;
-    constexpr uintptr_t Site_InvMgrDrawJmp = 0x7a8486;
-    constexpr uintptr_t MissionDraw = 0x44bcf0;
-    constexpr uintptr_t Site_InvMissionDraw = 0x8a00cd;
+    static uintptr_t InvMgrDraw = 0x8a5940;
+    static uintptr_t Site_InvMgrDrawCall = 0x7a7678;
+    static uintptr_t Site_InvMgrDrawJmp = 0x7a8486;
+    static uintptr_t MissionDraw = 0x44bcf0;
+    static uintptr_t Site_InvMissionDraw = 0x8a00cd;
 }
 struct UiPatch {
     int x, y, w, h;           // drawn here (game coordinates)
@@ -3162,8 +3205,8 @@ static void __fastcall Hook_InvMgrDraw(void* self, void* edx, void* canvas)
 // per screen quarter, anchored to that corner like the interface; the mouse is
 // mapped the other way while it is shown.
 namespace addr {
-    constexpr uintptr_t Site_ManualDraw = 0x7a82c8;
-    constexpr uintptr_t ManualDraw = 0x5e94c0;
+    static uintptr_t Site_ManualDraw = 0x7a82c8;
+    static uintptr_t ManualDraw = 0x5e94c0;
 }
 static void __fastcall Hook_ManualDraw(void* self, void* edx, void* canvas)
 {
@@ -3322,7 +3365,7 @@ static void LoadScreenMode640()
 {
     uintptr_t j = *(uintptr_t*)addr::G_Juego;
     if (!j) return;
-    void* video = *(void**)0xC15BDC;
+    void* video = *(void**)addr::G_Video;
     if (video) {
         VideoMode mode = {};
         ((PFN_VideoMode)0x8ed510)(video, nullptr, &mode);
@@ -3345,7 +3388,7 @@ static void LoadScreenRestoreMode()
     if (!g_loadScreenSwitched) return;
     g_loadScreenSwitched = false;
     uintptr_t j = *(uintptr_t*)addr::G_Juego;
-    void* video = *(void**)0xC15BDC;
+    void* video = *(void**)addr::G_Video;
     if (j && video && At<int>(j, addr::J_State) == g_stateBeforeLoadScreen) {
         int r = ((PFN_VideoMode)0x8ed530)(video, nullptr, &g_modeBeforeLoadScreen);
         Log("loading screen ended on the same screen: display restored to %dx%d (%d)\n",
@@ -3486,6 +3529,81 @@ static DWORD WINAPI ProfilerThread(void*)
     return 0;
 }
 
+// ---------------------------------------------------------------------------
+// Game versions. Steam (Comm2.exe, 2016 rebuild) is the reference; the GOG release
+// (comm2.exe, original 2001 build, identical to the Steam "Legacy" folder) is the
+// same code compiled differently: other addresses, same object layouts. Addresses
+// of features not ported to the GOG build are 0 (those features are skipped).
+// ---------------------------------------------------------------------------
+
+static bool IsSteamBuild()
+{
+    const char* sig = (const char*)0xAEC13C;
+    return !IsBadReadPtr(sig, 13) && memcmp(sig, "NoLimitedFps", 13) == 0 &&
+           *(uint32_t*)(0xAF37C4 + 8) == 0x484820;
+}
+
+static bool IsGogBuild()
+{
+    const char* sig = (const char*)0xB06508;
+    return !IsBadReadPtr(sig, 13) && memcmp(sig, "NoLimitedFps", 13) == 0 &&
+           !IsBadReadPtr((void*)0xAEB914, 4) && *(uint32_t*)0xAEB914 == 0x520930;
+}
+
+static void UseGogAddresses()
+{
+    using namespace addr;
+    // main loop (WinMain)
+    Site_Update = 0x40323a; Site_Frame = 0x4032a9; Site_EndIter = 0x403465;
+    Update = 0x4523d0; Frame = 0x4526f0; CanvasInit = 0x420dc0; CanvasReset = 0x420f60;
+    VideoLock = 0x421510; VideoUnlock = 0x421590; VideoPresent = 0x422220;
+    WM_LockInfo = 0x18; WM_NoDraw = 0x17; WM_Canvas = 0x44; WM_Video = 0x90; WM_HaveVideo = 0x9c; WM_SurfInfo = 0x11c;
+    G_Juego = 0xB58488; G_Mision = 0xB5A650; G_FrameAdapt = 0xB0925C; G_DrewFrame = 0xB09268;
+    G_SkipPresent = 0xB5A648; G_Video = 0xB58654;
+    PollCursorPos = 0x4023c0; GetScreen = 0x4522e0;
+    VT_Briefing = 0xAE81D4; VT_BriefingRed = 0xAE8184;
+    VT_VisorMundo = 0xAEB90C;
+    // inventory drag
+    G_InventarioMgr = 0xB5A654; VT_GridInv = 0xAEC518;
+    // per-draw animations
+    SeqDraw = 0x6ced50; SeqDraw_Continue = 0x6ced5f; SeqDraw_DrawOnly = 0x6cedd2; SeqDraw_Exit = 0x6cee29;
+    Site_CursorAnimTick = 0x51c839; CursorAnimTick = 0x516080;
+    Site_InvEffectStep = 0x4c54dc; InvEffectStep = 0x5d6b70;
+    Site_InvEffectDraw = 0x4c54f6; InvEffectDraw = 0x5d6c20; InvEffectFrame = 0x5d6950; G_ShineColour = 0xB64D44;
+    TextFieldDraw = 0x8d6ba0;
+    {
+        const uintptr_t t[] = { 0x474840, 0x474c77, 0x481890, 0x482f17, 0x484477, 0x8d6cba };
+        for (int i = 0; i < 6; i++) Sites_TextFieldDraw[i] = t[i];
+    }
+    // moving objects
+    ObjProject = 0x937d30;
+    Site_ObjProject[0] = 0x90ec14; Site_ObjProject[1] = 0x90f96a; Site_ObjProject[2] = 0x93b171;
+    VT_VisualPolygon = 0xAECBAC;
+    // cursor
+    DrawCursor = 0x90ac80; Site_DrawCursorFrame = 0x452a93; Site_DrawCursorJmp = 0x452c1e;
+    Site_CursorDrawNow = 0; CursorDrawNow = 0;
+    Sites_CursorDrawInner[0] = 0x90ac69; Sites_CursorDrawInner[1] = 0x90ad5f; CursorDrawInner = 0x90ad70;
+    IAT_GetCursorPos = 0xBAAC14;
+    Sites_GetCursorPos[0] = 0; Sites_GetCursorPos[1] = 0; Thunk_GetCursorPos = 0;
+    // not ported yet: HD resolution, pause menu, interface scaling, cheats, map
+    // background fixes and cache, water rendering, inventory double click
+    VT_MenuInGame = 0; Site_PauseWorld = 0; MisionDraw = 0; Site_PauseScreenSz = 0; Site_MenuLayoutSz = 0;
+    Site_PauseLayout = 0; MenuLayout = 0; GetScreenSize = 0; SurfLock = 0; SurfUnlock = 0;
+    Site_PauseBackdrop = 0; Blit = 0;
+    TileBlit = 0; TileBlitBlend = 0; Site_TileBlit = 0; Site_TileBlitBlend = 0; TileCacheColCap = 0;
+    Site_CheatInput = 0; CheatInput = 0; Site_CheatMatch = 0; CheatMatch = 0;
+    RastEdgeUV = 0; WaterSpanRow = 0; Site_MapDraw = 0; MapDraw = 0; VT_RootWindow = 0;
+    InvMgrDraw = 0; Site_InvMgrDrawCall = 0; Site_InvMgrDrawJmp = 0; MissionDraw = 0; Site_InvMissionDraw = 0;
+    Site_ManualDraw = 0; ManualDraw = 0;
+
+    Game_Update = (PFN_Void0)Update; Game_Frame = (PFN_Void1)Frame;
+    Game_CanvasInit = (PFN_Int1)CanvasInit; Game_CanvasReset = (PFN_Void0)CanvasReset;
+    Game_VideoLock = (PFN_Int1)VideoLock; Game_VideoUnlock = (PFN_Int1)VideoUnlock;
+    Game_VideoPresent = (PFN_Int1)VideoPresent;
+    Game_CursorAnimTick = (PFN_Void0)CursorAnimTick;
+    Game_ObjProject = (PFN_Project)ObjProject;
+}
+
 #include "settings_menu.h"
 
 static void Init()
@@ -3514,18 +3632,27 @@ static void Init()
     Log(MOD_NAME " " MOD_VERSION " loaded. enabled=%d camera=%d objects=%d maxFps=%d hd=%dx%d\n", g_cfg.enabled, g_cfg.camera,
         g_cfg.objects, g_cfg.maxFps, g_cfg.hdW, g_cfg.hdH);
 
-    // Sanity check that this is the expected executable build.
-    const char* sig = (const char*)0xAEC13C;
-    if (IsBadReadPtr(sig, 13) || memcmp(sig, "NoLimitedFps", 13) != 0 ||
-        *(uint32_t*)(addr::VT_VisorMundo + addr::VT_VisorMundo_Draw * 4) != 0x484820) {
+    // Which executable is this?
+    if (IsSteamBuild()) {
+        Log("game version: Steam\n");
+    } else if (IsGogBuild()) {
+        g_gog = true;
+        UseGogAddresses();
+        // Not ported to this version yet.
+        g_cfg.hdMenus = false; g_cfg.pauseScale = 0; g_cfg.uiScale = 1.0f; g_cfg.cheats = false;
+        if (g_cfg.debug > 1) g_cfg.debug = 1;
+        Log("game version: GOG / original 2001 build (smoothing and settings menu; "
+            "HD resolution, pause menu, interface scaling, cheats and optimizations not available yet)\n");
+    } else {
         Log("unexpected Comm2.exe build - hooks disabled\n");
         return;
     }
-    PatchHDResolution();
-    PatchTileBlitOverflow();   // game bug fix, needed for resolutions above 1280x720
-    PatchCheats();
-    PatchInventoryDoubleClick();   // game bug fix
-    {
+    g_seqAddr[0] = addr::SeqDraw_Continue; g_seqAddr[1] = addr::SeqDraw_DrawOnly; g_seqAddr[2] = addr::SeqDraw_Exit;
+    if (!g_gog) {
+        PatchHDResolution();
+        PatchTileBlitOverflow();   // game bug fix, needed for resolutions above 1280x720
+        PatchCheats();
+        PatchInventoryDoubleClick();   // game bug fix
         char ini[MAX_PATH];
         sprintf_s(ini, "%s\\" MOD_NAME ".ini", g_dir);
         if (GetPrivateProfileIntA(MOD_NAME, "Optimizations", 1, ini)) PatchPerformance();
@@ -3551,7 +3678,9 @@ static void Init()
     if (!ok) { Log("patching failed\n"); return; }
     Game_VisorDraw = (PFN_Void1)PatchVtable(addr::VT_VisorMundo, addr::VT_VisorMundo_Draw, (void*)&Hook_VisorDraw);
     static const uint8_t seqProlog[] = { 0x56, 0x8B, 0xF1, 0x80, 0x7E, 0x44, 0x00, 0x0F, 0x84 };
-    if (PatchJmp(addr::SeqDraw, seqProlog, sizeof(seqProlog), (void*)&Stub_SeqDraw))
+    static const uint8_t seqPrologGog[] = { 0x56, 0x8B, 0xF1, 0x57, 0x8A, 0x46, 0x44, 0x84, 0xC0, 0x0F, 0x84 };
+    if (g_gog ? PatchJmp(addr::SeqDraw, seqPrologGog, sizeof(seqPrologGog), (void*)&Stub_SeqDrawGog)
+              : PatchJmp(addr::SeqDraw, seqProlog, sizeof(seqProlog), (void*)&Stub_SeqDraw))
         Log("face sequence hook installed\n");
     if (PatchCallRel32(addr::Site_CursorAnimTick, addr::CursorAnimTick, (void*)&Hook_CursorAnimTick))
         Log("cursor animation hook installed\n");
@@ -3560,9 +3689,13 @@ static void Init()
     if (PatchCallRel32(addr::Site_InvEffectDraw, addr::InvEffectDraw, (void*)&Hook_InvEffectDraw))
         Log("inventory effect draw hook installed\n");
     int caretOk = 0;
-    for (uintptr_t site : addr::Sites_TextFieldDraw)
+    int caretSites = 0;
+    for (uintptr_t site : addr::Sites_TextFieldDraw) {
+        if (!site) continue;
+        caretSites++;
         caretOk += PatchCallRel32(site, addr::TextFieldDraw, (void*)&Hook_TextFieldDraw) ? 1 : 0;
-    Log("text caret hooks installed: %d/5\n", caretOk);
+    }
+    Log("text caret hooks installed: %d/%d\n", caretOk, caretSites);
     int projOk = 0;
     for (uintptr_t site : addr::Site_ObjProject)
         projOk += PatchCallRel32(site, addr::ObjProject, (void*)&Hook_ObjProject) ? 1 : 0;
@@ -3570,7 +3703,7 @@ static void Init()
     {
         char ini[MAX_PATH];
         sprintf_s(ini, "%s\\" MOD_NAME ".ini", g_dir);
-        if (GetPrivateProfileIntA(MOD_NAME, "Optimizations", 1, ini)) PatchMapCache();
+        if (!g_gog && GetPrivateProfileIntA(MOD_NAME, "Optimizations", 1, ini)) PatchMapCache();
         if (g_cfg.uiScale != 1.0f) PatchUiScaleOnce();
     }
     Log("hooks installed\n");

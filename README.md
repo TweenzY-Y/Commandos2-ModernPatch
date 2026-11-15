@@ -4,7 +4,8 @@
 [![Downloads](https://img.shields.io/github/downloads/TweenzY-Y/Commandos2-ModernPatch/total)](../../releases)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
 
-High frame rate, Full HD and bug-fix patch for **Commandos 2: Men of Courage** (Steam).
+High frame rate, Full HD and bug-fix patch for **Commandos 2: Men of Courage** (Steam;
+GOG with smoothing so far).
 
 Commandos 2 runs its game logic and its rendering at a fixed 25 frames per second.
 Commandos2-ModernPatch keeps the game logic at its original 25 ticks per second — so
@@ -67,9 +68,14 @@ applies its changes in memory while the game runs.
 
 ## Requirements
 
-- Commandos 2: Men of Courage, **Steam version**, the main executable `Comm2.exe`
-  (SHA-256 `3645321656e05fab2cb91cff7d416152c9276d821ffef85cd0399bd4a15d1aaa`).
-  The "Legacy" version (`Legacy\comm2.exe`) is not supported.
+- Commandos 2: Men of Courage, one of:
+  - **Steam version**, the main executable `Comm2.exe`
+    (SHA-256 `3645321656e05fab2cb91cff7d416152c9276d821ffef85cd0399bd4a15d1aaa`): all features.
+  - **GOG version** `comm2.exe` (the original 2001 release, also the Steam "Legacy" folder,
+    SHA-256 `f4ca330c86ad3fad293a26ba2d3425dbb69002494e6fb524e13936fcb60253be`): smoothing
+    (camera, units, cursor, inventory dragging), borderless full screen and the settings
+    menu. HD resolution, the HD pause menu, interface scaling, cheats and the performance
+    optimizations are not available in this version yet.
 - Windows 10 or 11.
 
 ## Installation
@@ -79,7 +85,7 @@ applies its changes in memory while the game runs.
    `C:\Program Files (x86)\Steam\steamapps\common\Commandos 2 Men of Courage`).
    You should end up with `ddraw.dll` and `Commandos2-ModernPatch.ini` next to
    `Comm2.exe`, plus a `Commandos2-ModernPatch` folder.
-3. Start the game normally from Steam (not the Legacy version).
+3. Start the game normally (Steam or GOG Galaxy).
 4. For Full HD: in the game's video options choose **1280x720 (16:9)** — the patch turns
    this mode into the resolution set in `HDResolution` (default 1920×1080). The label in
    the menu keeps saying 1280x720.
@@ -138,8 +144,8 @@ recognised the game and which parts were enabled.
 
 | Problem | What to try |
 |---|---|
-| Nothing changes, the log says `unexpected Comm2.exe build - hooks disabled` | The patch only works with the Steam `Comm2.exe` (see Requirements). The GOG and Legacy versions, and executables changed by other mods, are not supported. If Steam updated the game, please open an issue. |
-| No log file at all | `ddraw.dll` is not being loaded: check that it is in the same folder as `Comm2.exe`, and that you start the main version from Steam, not "Legacy". Some antivirus programs block or quarantine proxy DLLs like `ddraw.dll`. |
+| Nothing changes, the log says `unexpected Comm2.exe build - hooks disabled` | The patch works with the Steam `Comm2.exe` and the GOG / Legacy `comm2.exe` (see Requirements). Executables changed by other mods are not supported. If the game was updated, please open an issue. |
+| No log file at all | `ddraw.dll` is not being loaded: check that it is in the same folder as the `Comm2.exe` you start. Some antivirus programs block or quarantine proxy DLLs like `ddraw.dll`. |
 | The game does not start, black screen or crash at start | Remove other DirectDraw / Direct3D wrappers from the game folder (HD Project files, ReShade `dxgi.dll` / `d3d9.dll`, dgVoodoo). Then try `CncDDraw=0`. Turn off overlays one by one (Steam, Discord, MSI Afterburner / RivaTuner, recording software). |
 | Black or flickering picture, wrong colours | In `Commandos2-ModernPatch\cnc-ddraw\ddraw.ini`, section `[comm2]`, change `renderer=auto` to `renderer=opengl`, `renderer=direct3d9` or `renderer=gdi`. Update the graphics driver. |
 | Stutter or low frame rate | Set `MaxFps` to your monitor refresh rate or lower (e.g. `MaxFps=60`). Check that the game runs on the dedicated graphics card on laptops. `Debug=1` writes frame statistics to the log. |

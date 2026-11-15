@@ -100,6 +100,12 @@ static void MenuInit()
     MenuAdd("Profile", "Profiler", "Logs the slowest parts of the game every 10 seconds (for development).",
             1, true, { { "0", "Off" }, { "1", "On" } });
 #undef ONOFF
+    if (g_gog) {   // not available in the GOG version yet
+        static const char* const na[] = { "HDResolution", "UIScale", "Cheats", "HDMenus", "PauseMenuScale", "Optimizations" };
+        for (const char* k : na)
+            for (size_t i = 0; i < g_menu.opts.size(); i++)
+                if (!strcmp(g_menu.opts[i].key, k)) { g_menu.opts.erase(g_menu.opts.begin() + i); break; }
+    }
 
     // Desktop resolution as an HD resolution choice
     {

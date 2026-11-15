@@ -1,6 +1,6 @@
 # Commandos2-ModernPatch — technical notes
 
-Target: Steam `Comm2.exe` (8 379 904 bytes, SHA-256
+Reference target: Steam `Comm2.exe` (8 379 904 bytes, SHA-256
 `3645321656e05fab2cb91cff7d416152c9276d821ffef85cd0399bd4a15d1aaa`), 32-bit, fixed
 image base `0x400000` (no ASLR). The executable has full MSVC RTTI (≈950 classes),
 which was used to name objects; `src/rtti_vtables.h` maps vtable addresses to class
@@ -12,6 +12,25 @@ checks the build (string `NoLimitedFps` at `0xAEC13C`, a known vtable entry) and
 patches `call rel32` sites, vtable slots and a few function entries. It forwards
 DirectDraw to cnc-ddraw (`Commandos2-ModernPatch\cnc-ddraw\ddraw.dll`, config passed through
 `CNC_DDRAW_CONFIG_FILE`) or to the system `ddraw.dll`.
+
+## Game versions
+
+The GOG release `comm2.exe` (8 192 056 bytes, SHA-256
+`f4ca330c86ad3fad293a26ba2d3425dbb69002494e6fb524e13936fcb60253be`, identical to the
+Steam `Legacy\comm2.exe`) is the original 2001 build (MSVC 6, no RTTI); the Steam
+executable is a 2016 rebuild of the same code (MSVC 9). Object layouts (CJuego, mission,
+camera, objects, inventory, canvas) are the same; code and data addresses differ. All
+addresses are variables in `addr::`, set to the Steam values and replaced by
+`UseGogAddresses()` when the GOG build is detected ("NoLimitedFps" at `0xB06508` and the
+world viewer vtable `0xAEB90C`). Features not ported yet have address 0 and are skipped.
+GOG-specific differences: the WinMain loop locals (lock info `+0x18`, no-draw flag
+`+0x17`, video `+0x90`, have-video `+0x9C`, surface info `+0x11C`); the face sequence
+draw pushes `edi` before its check (separate stub); `CJuego::DrawCursor` calls the cursor
+draw instead of jumping to it; the cursor's set-position inlines the immediate draw and
+calls the inner draw `0x90AD70` (thiscall, 3 arguments) from `0x90AC69` and `0x90AD5F`.
+The GOG addresses were found by aligning the calls and data references of matching
+functions, starting from the main loop and unique strings, and checked by comparing the
+disassembly.
 
 ## Main loop
 
