@@ -32,6 +32,18 @@ The GOG addresses were found by aligning the calls and data references of matchi
 functions, starting from the main loop and unique strings, and checked by comparing the
 disassembly.
 
+GOG build, pause menu and interface scaling: `CMAMenuInGame` vtable `0xAE8E60` (draw
+`0x464150`: world `0x464168`, screen size `0x464178`, backdrop blit `0x4325c0` at
+`0x4641f0`; activate `0x464270`: menu size `0x46427d`/`0x464289`, layout `0x4642d0`).
+The in-game menu's "show window + layout" (Steam `0x7ab030`) is inlined at many places,
+so the layout's screen size (`0x47acb6` in `0x47aca0`) is forced while the pause menu is
+the current screen. Mission activate `0x464e9d`/`0x464eb7`, loading screens `0x517935`,
+`0x518fbf`, `0x51a519`; video set mode `0x40ee70`. Cursor reads `0x415288`, `0x40eeb7`,
+thunk `0x404d88`. Inventory manager draw wrapper `0x49a180` (called at `0x45bd08`,
+`0x4619eb`), mission draw in it at `0x4c53f2`; notebook `0x52ab20` at `0x461828`. The root
+window class (`V_CVentana`) is not identifiable without RTTI: its vtable is read from the
+first mission's root window (`mission+0x59C` -> `+4`).
+
 GOG build, HD mode and map fixes: size getters `0x4ecf30`/`0x4ecf80`/`0x4ecfd0`/`0x4ed010`/
 `0x4ed070`, clamps `0x4ecf12`/`0x4ec4cf`, `SetVideoMode` `0x4546e0` (six callers), label
 `0x476110` (lookup `0x414ef0` at `0x47614a`), steps `0x476374`, `0x476b7e`, `0x476d28`

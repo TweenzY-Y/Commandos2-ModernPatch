@@ -269,11 +269,12 @@ static PFN_Void1 Game_VisorDraw    = nullptr;  // original vtable entry
 // ---------------------------------------------------------------------------
 // Patching helpers
 // ---------------------------------------------------------------------------
-static bool PatchCallRel32(uintptr_t site, uintptr_t expectedTarget, void* newTarget)
+// Redirects a call or jmp rel32 at 'site' (currently going to expectedTarget).
+static bool PatchBranch(uintptr_t site, uintptr_t expectedTarget, void* newTarget)
 {
     if (!site || !expectedTarget) { Log("patch: address not known for this game version\n"); return false; }
     uint8_t* p = (uint8_t*)site;
-    if (p[0] != 0xE8) { Log("patch @%08X: not a call (%02X)\n", (unsigned)site, p[0]); return false; }
+    if (p[0] != 0xE8 && p[0] != 0xE9) { Log("patch @%08X: not a call/jmp (%02X)\n", (unsigned)site, p[0]); return false; }
     uintptr_t cur = site + 5 + *(int32_t*)(p + 1);
     if (cur != expectedTarget) { Log("patch @%08X: unexpected target %08X\n", (unsigned)site, (unsigned)cur); return false; }
     DWORD old;
@@ -671,6 +672,7 @@ static uintptr_t InventoryDragGrid()
 
 static void PauseUpdate();
 static void MigrateHDMode();
+static void PatchRootWindowDrawFromMission();
 static void MenuPoll();
 static bool MenuBlocksGame();
 static void MenuDraw(void* canvas);
@@ -715,6 +717,7 @@ static void __fastcall Hook_Update(void* self, void* edx)
     }
     if (g_cfg.debug >= 2) DiagPoll(inGame);
     if (!g_gog) DiagWindowTrees();
+    else PatchRootWindowDrawFromMission();
 
     bool inMenu = !inGame && g_active && g_cfg.menus && IsMenuScreen();
     if (inMenu != g_inMenu) {
@@ -1738,6 +1741,13 @@ static BOOL CALLBACK FindGameWnd(HWND h, LPARAM)
     return TRUE;
 }
 
+static bool PauseMenuIsCurrent()
+{
+    uintptr_t j = *(uintptr_t*)addr::G_Juego;
+    uintptr_t scr = j ? CurrentScreen(j) : 0;
+    return scr && addr::VT_MenuInGame && *(uintptr_t*)scr == addr::VT_MenuInGame;
+}
+
 static void PauseUpdate()
 {
     if (!g_origWndProc) {
@@ -1747,12 +1757,8 @@ static void PauseUpdate()
             Log("game window %08X subclassed\n", (unsigned)(uintptr_t)g_gameWnd);
         }
     }
-    bool active = false;
     uintptr_t j = *(uintptr_t*)addr::G_Juego;
-    if (g_cfg.hdMenus && g_cfg.pauseScale && j) {
-        uintptr_t scr = CurrentScreen(j);
-        active = scr && *(uintptr_t*)scr == addr::VT_MenuInGame;
-    }
+    const bool active = g_cfg.hdMenus && g_cfg.pauseScale && PauseMenuIsCurrent();
     if (active != g_pauseScaleActive) Log("scaled pause menu: %d\n", (int)active);
     if (g_cfg.debug && j) {
         static uintptr_t lastVt = 0;
@@ -1769,10 +1775,15 @@ static void __fastcall Hook_PauseScreenSize(void* self, void* edx, int* out)
     ((PFN_GetScreenSize)addr::GetScreenSize)(self, edx, out);
     if (g_cfg.pauseScale && (g_pauseScaleActive || g_forceMenuSize)) { out[0] = 640; out[1] = 480; }
 }
+static bool PauseMenuIsCurrent();
+// The GOG build inlines the in-game menu's "show window + layout" (Steam 0x7ab030)
+// at many places: there the layout of any window while the pause menu is the
+// current screen is forced.
 static void __fastcall Hook_MenuLayoutScreenSize(void* self, void* edx, int* out)
 {
     ((PFN_GetScreenSize)addr::GetScreenSize)(self, edx, out);
-    if (g_cfg.pauseScale && g_forceMenuSize) { out[0] = 640; out[1] = 480; }
+    const bool force = g_forceMenuSize || (g_gog && PauseMenuIsCurrent());
+    if (g_cfg.pauseScale && force) { out[0] = 640; out[1] = 480; }
 }
 static void __fastcall Hook_PauseLayout(void* self, void* edx)
 {
@@ -2130,11 +2141,11 @@ static void PatchIndirectToDirect(uintptr_t at, uint8_t modrm, uint8_t newOp, vo
 static bool InstallCursorHooks();
 static void PatchScaledPause()
 {
-    bool ok = PatchCallRel32(addr::Site_PauseWorld, addr::MisionDraw, (void*)&Hook_PauseWorld);
-    ok &= PatchCallRel32(addr::Site_PauseScreenSz, addr::GetScreenSize, (void*)&Hook_PauseScreenSize);
-    ok &= PatchCallRel32(addr::Site_MenuLayoutSz, addr::GetScreenSize, (void*)&Hook_MenuLayoutScreenSize);
-    ok &= PatchCallRel32(addr::Site_PauseLayout, addr::MenuLayout, (void*)&Hook_PauseLayout);
-    ok &= PatchCallRel32(addr::Site_PauseBackdrop, addr::Blit, (void*)&Hook_PauseBackdrop);
+    bool ok = PatchBranch(addr::Site_PauseWorld, addr::MisionDraw, (void*)&Hook_PauseWorld);
+    ok &= PatchBranch(addr::Site_PauseScreenSz, addr::GetScreenSize, (void*)&Hook_PauseScreenSize);
+    ok &= PatchBranch(addr::Site_MenuLayoutSz, addr::GetScreenSize, (void*)&Hook_MenuLayoutScreenSize);
+    ok &= PatchBranch(addr::Site_PauseLayout, addr::MenuLayout, (void*)&Hook_PauseLayout);
+    ok &= PatchBranch(addr::Site_PauseBackdrop, addr::Blit, (void*)&Hook_PauseBackdrop);
     ok &= InstallCursorHooks();
     Log("scaled pause menu hooks: %s\n", ok ? "ok" : "FAILED");
 }
@@ -2176,20 +2187,12 @@ static bool InstallCursorHooks()
 {
     if (g_cursorReadHooks) return true;
     g_cursorReadHooks = true;
-    bool ok = PatchCallRel32(addr::Site_DrawCursorFrame, addr::DrawCursor, (void*)&Hook_DrawCursor);
+    bool ok = PatchBranch(addr::Site_DrawCursorFrame, addr::DrawCursor, (void*)&Hook_DrawCursor);
     if (addr::Site_CursorDrawNow)
-        ok &= PatchCallRel32(addr::Site_CursorDrawNow, addr::CursorDrawNow, (void*)&Hook_CursorDrawNow);
+        ok &= PatchBranch(addr::Site_CursorDrawNow, addr::CursorDrawNow, (void*)&Hook_CursorDrawNow);
     for (uintptr_t site : addr::Sites_CursorDrawInner)
-        if (site) ok &= PatchCallRel32(site, addr::CursorDrawInner, (void*)&Hook_CursorDrawInner);
-    {   // jmp (Steam) / call (GOG) rel32 in CJuego::DrawCursor -> Hook_DrawCursor
-        uint8_t* p = (uint8_t*)addr::Site_DrawCursorJmp;
-        if ((p[0] == 0xE9 || p[0] == 0xE8) &&
-            (uintptr_t)(addr::Site_DrawCursorJmp + 5 + *(int32_t*)(p + 1)) == addr::DrawCursor) {
-            DWORD old; VirtualProtect(p, 5, PAGE_EXECUTE_READWRITE, &old);
-            *(int32_t*)(p + 1) = (int32_t)((uintptr_t)&Hook_DrawCursor - (addr::Site_DrawCursorJmp + 5));
-            VirtualProtect(p, 5, old, &old);
-        } else { ok = false; Log("cursor jmp patch: unexpected bytes\n"); }
-    }
+        if (site) ok &= PatchBranch(site, addr::CursorDrawInner, (void*)&Hook_CursorDrawInner);
+    ok &= PatchBranch(addr::Site_DrawCursorJmp, addr::DrawCursor, (void*)&Hook_DrawCursor);
     for (uintptr_t s : addr::Sites_GetCursorPos) PatchIndirectToDirect(s, 0x15, 0xE8, (void*)&Hook_GetCursorPos);
     PatchIndirectToDirect(addr::Thunk_GetCursorPos, 0x25, 0xE9, (void*)&Hook_GetCursorPos);
     return ok;
@@ -2727,7 +2730,7 @@ static void __fastcall Hook_MapDraw(void* self, void* edx, void* canvas, void* c
 
 static void PatchMapCache()
 {
-    bool ok = PatchCallRel32(addr::Site_MapDraw, addr::MapDraw, (void*)&Hook_MapDraw);
+    bool ok = PatchBranch(addr::Site_MapDraw, addr::MapDraw, (void*)&Hook_MapDraw);
     Log("map background cache: %s\n", ok ? "ok" : "FAILED");
 }
 
@@ -3282,21 +3285,31 @@ static void __fastcall Hook_ManualDraw(void* self, void* edx, void* canvas)
 }
 
 static bool InstallCursorHooks();
+static void PatchRootWindowDraw(uintptr_t vtable)
+{
+    g_rootWindowDraw = (PFN_Void1)PatchVtable(vtable, 2, (void*)&Hook_RootWindowDraw);
+    Log("mission root window draw hook (vtable %08X)\n", (unsigned)vtable);
+}
+
+// GOG build: the root window class is not known in advance (no RTTI); take the
+// vtable of the first mission's root window.
+static void PatchRootWindowDrawFromMission()
+{
+    if (g_rootWindowDraw || !UiScalingActive()) return;
+    uintptr_t m = *(uintptr_t*)addr::G_Mision;
+    uintptr_t mgr = m ? At<uintptr_t>(m, 0x59c) : 0;
+    uintptr_t root = mgr ? At<uintptr_t>(mgr, 4) : 0;
+    if (root) PatchRootWindowDraw(*(uintptr_t*)root);
+}
+
 static void PatchUiScale()
 {
-    g_rootWindowDraw = (PFN_Void1)PatchVtable(addr::VT_RootWindow, 2, (void*)&Hook_RootWindowDraw);
-    bool ok = g_rootWindowDraw != nullptr;
-    ok &= PatchCallRel32(addr::Site_InvMgrDrawCall, addr::InvMgrDraw, (void*)&Hook_InvMgrDraw);
-    {   // jmp rel32 at 0x7a8486 -> Hook_InvMgrDraw
-        uint8_t* p = (uint8_t*)addr::Site_InvMgrDrawJmp;
-        if (p[0] == 0xE9 && (uintptr_t)(addr::Site_InvMgrDrawJmp + 5 + *(int32_t*)(p + 1)) == addr::InvMgrDraw) {
-            DWORD old; VirtualProtect(p, 5, PAGE_EXECUTE_READWRITE, &old);
-            *(int32_t*)(p + 1) = (int32_t)((uintptr_t)&Hook_InvMgrDraw - (addr::Site_InvMgrDrawJmp + 5));
-            VirtualProtect(p, 5, old, &old);
-        } else ok = false;
-    }
-    ok &= PatchCallRel32(addr::Site_InvMissionDraw, addr::MissionDraw, (void*)&Hook_InvMissionDraw);
-    ok &= PatchCallRel32(addr::Site_ManualDraw, addr::ManualDraw, (void*)&Hook_ManualDraw);
+    bool ok = true;
+    if (addr::VT_RootWindow) PatchRootWindowDraw(addr::VT_RootWindow);
+    ok &= PatchBranch(addr::Site_InvMgrDrawCall, addr::InvMgrDraw, (void*)&Hook_InvMgrDraw);
+    ok &= PatchBranch(addr::Site_InvMgrDrawJmp, addr::InvMgrDraw, (void*)&Hook_InvMgrDraw);
+    ok &= PatchBranch(addr::Site_InvMissionDraw, addr::MissionDraw, (void*)&Hook_InvMissionDraw);
+    ok &= PatchBranch(addr::Site_ManualDraw, addr::ManualDraw, (void*)&Hook_ManualDraw);
     ok &= InstallCursorHooks();
     Log("interface scaling hooks: %s (UIScale=%.2f)\n", ok ? "ok" : "FAILED", g_cfg.uiScale);
 }
@@ -3310,15 +3323,15 @@ static bool PatchUiScaleOnce()
 
 static void PatchCheats()
 {
-    bool ok = PatchCallRel32(addr::Site_CheatMatch, addr::CheatMatch, (void*)&Hook_CheatMatch);
-    ok &= PatchCallRel32(addr::Site_CheatInput, addr::CheatInput, (void*)&Hook_CheatInput);
+    bool ok = PatchBranch(addr::Site_CheatMatch, addr::CheatMatch, (void*)&Hook_CheatMatch);
+    ok &= PatchBranch(addr::Site_CheatInput, addr::CheatInput, (void*)&Hook_CheatInput);
     Log("cheat hooks: %s (Cheats=%d)\n", ok ? "ok" : "FAILED", g_cfg.cheats ? 1 : 0);
 }
 
 static void PatchTileBlitOverflow()
 {
-    bool ok = PatchCallRel32(addr::Site_TileBlit, addr::TileBlit, (void*)&Hook_TileBlit);
-    ok &= PatchCallRel32(addr::Site_TileBlitBlend, addr::TileBlitBlend, (void*)&Hook_TileBlitBlend);
+    bool ok = PatchBranch(addr::Site_TileBlit, addr::TileBlit, (void*)&Hook_TileBlit);
+    ok &= PatchBranch(addr::Site_TileBlitBlend, addr::TileBlitBlend, (void*)&Hook_TileBlitBlend);
     Log("map background tile-array overflow fix: %s\n", ok ? "ok" : "FAILED");
     // The map tile cache (set up at 0x858730) holds (screen tiles + 1) * zoom-out
     // factor columns, capped at 24 (mov eax, 0x18 at 0x8587ce) to match the blitter
@@ -3343,94 +3356,6 @@ static void PatchTileBlitOverflow()
 // bpp, flag byte}): the game's SetMode 0x402a00 would also notify the half-loaded
 // mission of the new size (0x7920d0), which crashes. The game switches to its
 // resolution normally once the mission is activated.
-static void LoadScreenMode640();
-typedef void(__fastcall* PFN_LoadScreenBegin)(void* self, void* edx, uint32_t a1, uint32_t a2, uint32_t a3);
-static void __fastcall Hook_LoadScreenBegin(void* self, void* edx, uint32_t a1, uint32_t a2, uint32_t a3)
-{
-    LoadScreenMode640();
-    ((PFN_LoadScreenBegin)0x4079d0)(self, edx, a1, a2, a3);
-}
-// Generic loading screen ("Loading, please wait": loading a saved game), 0x4075c0
-// (thiscall(kind), called at 0x44d4c5 and 0x44e076).
-static void __fastcall Hook_LoadScreenBeginGeneric(void* self, void* edx, uint32_t kind)
-{
-    LoadScreenMode640();
-    ((PFN_Void1)0x4075c0)(self, edx, (void*)(uintptr_t)kind);
-}
-struct VideoMode { int w, h, bpp; uint8_t flag; uint8_t pad[3]; };
-static VideoMode g_modeBeforeLoadScreen;
-static bool g_loadScreenSwitched = false;
-static int g_stateBeforeLoadScreen = -1;
-typedef int(__fastcall* PFN_VideoMode)(void* self, void* edx, void* mode);
-static void LoadScreenMode640()
-{
-    uintptr_t j = *(uintptr_t*)addr::G_Juego;
-    if (!j) return;
-    void* video = *(void**)addr::G_Video;
-    if (video) {
-        VideoMode mode = {};
-        ((PFN_VideoMode)0x8ed510)(video, nullptr, &mode);
-        if (mode.w != 640 || mode.h != 480) {
-            g_modeBeforeLoadScreen = mode;
-            g_loadScreenSwitched = true;
-            g_stateBeforeLoadScreen = At<int>(j, addr::J_State);
-            mode.w = 640; mode.h = 480; mode.bpp = 16;
-            int r = ((PFN_VideoMode)0x8ed530)(video, nullptr, &mode);
-            Log("loading screen: display switched to 640x480 (%d)\n", r);
-        }
-    }
-}
-// After the logic update that ran the loading screen: if the game is still on the
-// same screen (quick save in the mission or the pause menu, quick load in the
-// mission), restore the previous mode. Restarting / loading from the pause menu move
-// on to the briefing or mission, which set their resolution themselves.
-static void LoadScreenRestoreMode()
-{
-    if (!g_loadScreenSwitched) return;
-    g_loadScreenSwitched = false;
-    uintptr_t j = *(uintptr_t*)addr::G_Juego;
-    void* video = *(void**)addr::G_Video;
-    if (j && video && At<int>(j, addr::J_State) == g_stateBeforeLoadScreen) {
-        int r = ((PFN_VideoMode)0x8ed530)(video, nullptr, &g_modeBeforeLoadScreen);
-        Log("loading screen ended on the same screen: display restored to %dx%d (%d)\n",
-            g_modeBeforeLoadScreen.w, g_modeBeforeLoadScreen.h, r);
-    }
-}
-
-static uint8_t* g_missionScreen = nullptr;
-typedef void(__fastcall* PFN_ScreenSetMode)(void* self, void* edx, int w, int h);
-static void __fastcall Hook_MissionActivateMode(void* self, void* edx, int w, int h)
-{
-    g_missionScreen = (uint8_t*)self;
-    if (((uint8_t*)self)[9]) w = 640, h = 480;   // reload pending: switch after it
-    ((PFN_ScreenSetMode)0x7add80)(self, edx, w, h);
-}
-static void __fastcall Hook_MissionReload(void* self, void* edx)
-{
-    ((PFN_Void0)0x447640)(self, edx);
-    uintptr_t opt = *(uintptr_t*)0xBCBADC;   // options
-    typedef int(__fastcall* PFN_Get)(void*, void*);
-    int w = ((PFN_Get)0x413fa0)((void*)opt, nullptr), h = ((PFN_Get)0x413fe0)((void*)opt, nullptr);
-    if (g_missionScreen && w > 0 && h > 0) ((PFN_ScreenSetMode)0x7add80)(g_missionScreen, nullptr, w, h);
-}
-
-static void PatchHDMenus()
-{
-    struct { uintptr_t site; uintptr_t from; uintptr_t to; } sites[] = {
-        { 0x7ab1a9, 0x414030, 0x413fe0 }, { 0x7ab1b5, 0x414020, 0x413fa0 },   // CMAMenuInGame::Activate
-        // CMABriefing (0x7a1eea/0x7a1ef6) is NOT patched: its overlay and map
-        // viewer have a fixed 640x480 layout without centring.
-    };
-    int ok = 0;
-    for (auto& s : sites) ok += PatchCallRel32(s.site, s.from, (void*)s.to) ? 1 : 0;
-    ok += PatchCallRel32(0x7abc2d, 0x7add80, (void*)&Hook_MissionActivateMode) ? 1 : 0;
-    ok += PatchCallRel32(0x7abc46, 0x447640, (void*)&Hook_MissionReload) ? 1 : 0;
-    ok += PatchCallRel32(0x44c901, 0x4079d0, (void*)&Hook_LoadScreenBegin) ? 1 : 0;
-    ok += PatchCallRel32(0x44d4c5, 0x4075c0, (void*)&Hook_LoadScreenBeginGeneric) ? 1 : 0;
-    ok += PatchCallRel32(0x44e076, 0x4075c0, (void*)&Hook_LoadScreenBeginGeneric) ? 1 : 0;
-    Log("HD pause menu: %d/7 patched\n", ok);
-}
-
 // ---------------------------------------------------------------------------
 // HD video mode: an extra entry (index 4) in the game's video modes, after
 // 640x480, 800x600, 1024x768 and 1280x720 (Steam) / 1280x1024 (GOG, not offered by
@@ -3602,10 +3527,10 @@ static void PatchHDMode()
     ok += PatchModeClamp(addr::SetterClamp);
     ok += PatchModeClamp(addr::LoaderClamp);
     for (uintptr_t site : addr::Sites_SetVideoMode)
-        if (site) { total++; ok += PatchCallRel32(site, addr::SetVideoMode, (void*)&Hook_SetVideoMode); }
+        if (site) { total++; ok += PatchBranch(site, addr::SetVideoMode, (void*)&Hook_SetVideoMode); }
     total += 2;
-    ok += PatchCallRel32(addr::Site_LabelDraw, addr::LabelDraw, (void*)&Hook_LabelDraw);
-    ok += PatchCallRel32(addr::Site_TextLookup, addr::TextLookup, (void*)&Hook_TextLookup);
+    ok += PatchBranch(addr::Site_LabelDraw, addr::LabelDraw, (void*)&Hook_LabelDraw);
+    ok += PatchBranch(addr::Site_TextLookup, addr::TextLookup, (void*)&Hook_TextLookup);
     for (const auto& s : addr::StepSites)
         if (s.start) { total++; ok += PatchModeStep(s); }
     Log("HD video mode (%dx%d, index %d): %d/%d patched\n", g_cfg.hdW, g_cfg.hdH, kModeIndexHD, ok, total);
@@ -3626,6 +3551,102 @@ static void MigrateHDMode()
         ((PFN_SetMode)0x415b90)((void*)opt, nullptr, kModeIndexHD);   // options setter (saves)
         Log("video mode 3 (HD in earlier versions) moved to the new HD mode\n");
     }
+}
+
+namespace addr {
+    static uintptr_t Site_PauseActivateHeight = 0x7ab1a9, MenuHeightFixed = 0x414030;
+    static uintptr_t Site_PauseActivateWidth  = 0x7ab1b5, MenuWidthFixed  = 0x414020;
+    static uintptr_t ScreenSetMode = 0x7add80, Site_MissionActivateMode = 0x7abc2d;   // thiscall(screen, w, h)
+    static uintptr_t MissionReload = 0x447640, Site_MissionReload = 0x7abc46;
+    static uintptr_t LoadScreenBegin = 0x4079d0, Site_LoadScreenBegin = 0x44c901;
+    static uintptr_t LoadScreenBeginGeneric = 0x4075c0;
+    static uintptr_t Sites_LoadScreenBeginGeneric[2] = { 0x44d4c5, 0x44e076 };
+    static uintptr_t VideoSetMode = 0x8ed530;   // thiscall(video, mode*); get mode = GetScreenSize
+}
+static void LoadScreenMode640();
+typedef void(__fastcall* PFN_LoadScreenBegin)(void* self, void* edx, uint32_t a1, uint32_t a2, uint32_t a3);
+static void __fastcall Hook_LoadScreenBegin(void* self, void* edx, uint32_t a1, uint32_t a2, uint32_t a3)
+{
+    LoadScreenMode640();
+    ((PFN_LoadScreenBegin)addr::LoadScreenBegin)(self, edx, a1, a2, a3);
+}
+// Generic loading screen ("Loading, please wait": loading a saved game), 0x4075c0
+// (thiscall(kind), called at 0x44d4c5 and 0x44e076).
+static void __fastcall Hook_LoadScreenBeginGeneric(void* self, void* edx, uint32_t kind)
+{
+    LoadScreenMode640();
+    ((PFN_Void1)addr::LoadScreenBeginGeneric)(self, edx, (void*)(uintptr_t)kind);
+}
+struct VideoMode { int w, h, bpp; uint8_t flag; uint8_t pad[3]; };
+static VideoMode g_modeBeforeLoadScreen;
+static bool g_loadScreenSwitched = false;
+static int g_stateBeforeLoadScreen = -1;
+typedef int(__fastcall* PFN_VideoMode)(void* self, void* edx, void* mode);
+static void LoadScreenMode640()
+{
+    uintptr_t j = *(uintptr_t*)addr::G_Juego;
+    if (!j) return;
+    void* video = *(void**)addr::G_Video;
+    if (video) {
+        VideoMode mode = {};
+        ((PFN_VideoMode)addr::GetScreenSize)(video, nullptr, &mode);
+        if (mode.w != 640 || mode.h != 480) {
+            g_modeBeforeLoadScreen = mode;
+            g_loadScreenSwitched = true;
+            g_stateBeforeLoadScreen = At<int>(j, addr::J_State);
+            mode.w = 640; mode.h = 480; mode.bpp = 16;
+            int r = ((PFN_VideoMode)addr::VideoSetMode)(video, nullptr, &mode);
+            Log("loading screen: display switched to 640x480 (%d)\n", r);
+        }
+    }
+}
+// After the logic update that ran the loading screen: if the game is still on the
+// same screen (quick save in the mission or the pause menu, quick load in the
+// mission), restore the previous mode. Restarting / loading from the pause menu move
+// on to the briefing or mission, which set their resolution themselves.
+static void LoadScreenRestoreMode()
+{
+    if (!g_loadScreenSwitched) return;
+    g_loadScreenSwitched = false;
+    uintptr_t j = *(uintptr_t*)addr::G_Juego;
+    void* video = *(void**)addr::G_Video;
+    if (j && video && At<int>(j, addr::J_State) == g_stateBeforeLoadScreen) {
+        int r = ((PFN_VideoMode)addr::VideoSetMode)(video, nullptr, &g_modeBeforeLoadScreen);
+        Log("loading screen ended on the same screen: display restored to %dx%d (%d)\n",
+            g_modeBeforeLoadScreen.w, g_modeBeforeLoadScreen.h, r);
+    }
+}
+
+static uint8_t* g_missionScreen = nullptr;
+typedef void(__fastcall* PFN_ScreenSetMode)(void* self, void* edx, int w, int h);
+static void __fastcall Hook_MissionActivateMode(void* self, void* edx, int w, int h)
+{
+    g_missionScreen = (uint8_t*)self;
+    if (((uint8_t*)self)[9]) w = 640, h = 480;   // reload pending: switch after it
+    ((PFN_ScreenSetMode)addr::ScreenSetMode)(self, edx, w, h);
+}
+static void __fastcall Hook_MissionReload(void* self, void* edx)
+{
+    ((PFN_Void0)addr::MissionReload)(self, edx);
+    uintptr_t opt = *(uintptr_t*)addr::G_Options;
+    int m = At<int>(opt, 0x54);
+    if (g_missionScreen) ((PFN_ScreenSetMode)addr::ScreenSetMode)(g_missionScreen, nullptr, ModeW(m), ModeH(m));
+}
+
+static void PatchHDMenus()
+{
+    // CMAMenuInGame::Activate sets the display to the fixed menu size: use the game
+    // resolution instead. CMABriefing is NOT patched: its overlay and map viewer have
+    // a fixed 640x480 layout without centring.
+    int ok = 0;
+    ok += PatchBranch(addr::Site_PauseActivateHeight, addr::MenuHeightFixed, (void*)addr::ModeHeight) ? 1 : 0;
+    ok += PatchBranch(addr::Site_PauseActivateWidth, addr::MenuWidthFixed, (void*)addr::ModeWidth) ? 1 : 0;
+    ok += PatchBranch(addr::Site_MissionActivateMode, addr::ScreenSetMode, (void*)&Hook_MissionActivateMode) ? 1 : 0;
+    ok += PatchBranch(addr::Site_MissionReload, addr::MissionReload, (void*)&Hook_MissionReload) ? 1 : 0;
+    ok += PatchBranch(addr::Site_LoadScreenBegin, addr::LoadScreenBegin, (void*)&Hook_LoadScreenBegin) ? 1 : 0;
+    for (uintptr_t site : addr::Sites_LoadScreenBeginGeneric)
+        ok += PatchBranch(site, addr::LoadScreenBeginGeneric, (void*)&Hook_LoadScreenBeginGeneric) ? 1 : 0;
+    Log("HD pause menu: %d/7 patched\n", ok);
 }
 
 // ---------------------------------------------------------------------------
@@ -3755,16 +3776,26 @@ static void UseGogAddresses()
     Site_CursorDrawNow = 0; CursorDrawNow = 0;
     Sites_CursorDrawInner[0] = 0x90ac69; Sites_CursorDrawInner[1] = 0x90ad5f; CursorDrawInner = 0x90ad70;
     IAT_GetCursorPos = 0xBAAC14;
-    Sites_GetCursorPos[0] = 0; Sites_GetCursorPos[1] = 0; Thunk_GetCursorPos = 0;
-    // not ported yet: pause menu, interface scaling, cheats, map background cache,
-    // water rendering, inventory double click
-    VT_MenuInGame = 0; Site_PauseWorld = 0; MisionDraw = 0; Site_PauseScreenSz = 0; Site_MenuLayoutSz = 0;
-    Site_PauseLayout = 0; MenuLayout = 0; GetScreenSize = 0; SurfLock = 0; SurfUnlock = 0;
-    Site_PauseBackdrop = 0; Blit = 0;
+    // not ported yet: cheats, map background cache, water rendering, inventory double click
+    // HD pause menu
+    VT_MenuInGame = 0xAE8E60; Site_PauseWorld = 0x464168; MisionDraw = 0x51c810; Site_PauseScreenSz = 0x464178;
+    Site_MenuLayoutSz = 0x47acb6; Site_PauseLayout = 0x4642d0; MenuLayout = 0x47aca0; GetScreenSize = 0x40ee50;
+    SurfLock = 0x42feb0; SurfUnlock = 0x42fee0; Site_PauseBackdrop = 0x4641f0; Blit = 0x4325c0;
+    Sites_GetCursorPos[0] = 0x415288; Sites_GetCursorPos[1] = 0x40eeb7; Thunk_GetCursorPos = 0x404d88;
+    Site_PauseActivateHeight = 0x46427d; MenuHeightFixed = 0x4ed060;
+    Site_PauseActivateWidth = 0x464289; MenuWidthFixed = 0x4ed050;
+    ScreenSetMode = 0x474f60; Site_MissionActivateMode = 0x464e9d;
+    MissionReload = 0x518ea0; Site_MissionReload = 0x464eb7;
+    LoadScreenBegin = 0x4e1490; Site_LoadScreenBegin = 0x517935;
+    LoadScreenBeginGeneric = 0x4e0d40; Sites_LoadScreenBeginGeneric[0] = 0x518fbf; Sites_LoadScreenBeginGeneric[1] = 0x51a519;
+    VideoSetMode = 0x40ee70;
+    // interface scaling (root window vtable: taken at runtime)
+    VT_RootWindow = 0;
+    InvMgrDraw = 0x49a180; Site_InvMgrDrawCall = 0x45bd08; Site_InvMgrDrawJmp = 0x4619eb;
+    MissionDraw = 0x51c810; Site_InvMissionDraw = 0x4c53f2;
+    Site_ManualDraw = 0x461828; ManualDraw = 0x52ab20;
     Site_CheatInput = 0; CheatInput = 0; Site_CheatMatch = 0; CheatMatch = 0;
-    RastEdgeUV = 0; WaterSpanRow = 0; Site_MapDraw = 0; MapDraw = 0; VT_RootWindow = 0;
-    InvMgrDraw = 0; Site_InvMgrDrawCall = 0; Site_InvMgrDrawJmp = 0; MissionDraw = 0; Site_InvMissionDraw = 0;
-    Site_ManualDraw = 0; ManualDraw = 0;
+    RastEdgeUV = 0; WaterSpanRow = 0; Site_MapDraw = 0; MapDraw = 0;
 
     // HD video mode (index 4, after 1280x1024 which the GOG options screen does not offer)
     G_Options = 0xB58490;
@@ -3828,11 +3859,9 @@ static void Init()
     } else if (IsGogBuild()) {
         g_gog = true;
         UseGogAddresses();
-        // Not ported to this version yet.
-        g_cfg.hdMenus = false; g_cfg.pauseScale = 0; g_cfg.uiScale = 1.0f; g_cfg.cheats = false;
+        g_cfg.cheats = false;   // not ported to this version yet
         if (g_cfg.debug > 1) g_cfg.debug = 1;
-        Log("game version: GOG / original 2001 build (pause menu, interface scaling, cheats "
-            "and optimizations not available yet)\n");
+        Log("game version: GOG / original 2001 build (cheats and optimizations not available yet)\n");
     } else {
         Log("unexpected Comm2.exe build - hooks disabled\n");
         return;
@@ -3862,9 +3891,9 @@ static void Init()
     g_qpcToMs = 1000.0 / (double)f.QuadPart;
     timeBeginPeriod(1);
 
-    bool ok = PatchCallRel32(addr::Site_Update, addr::Update, (void*)&Hook_Update);
-    ok = ok && PatchCallRel32(addr::Site_Frame, addr::Frame, (void*)&Hook_Frame);
-    ok = ok && PatchCallRel32(addr::Site_EndIter, addr::CanvasReset, (void*)&Hook_EndIter);
+    bool ok = PatchBranch(addr::Site_Update, addr::Update, (void*)&Hook_Update);
+    ok = ok && PatchBranch(addr::Site_Frame, addr::Frame, (void*)&Hook_Frame);
+    ok = ok && PatchBranch(addr::Site_EndIter, addr::CanvasReset, (void*)&Hook_EndIter);
     if (!ok) { Log("patching failed\n"); return; }
     Game_VisorDraw = (PFN_Void1)PatchVtable(addr::VT_VisorMundo, addr::VT_VisorMundo_Draw, (void*)&Hook_VisorDraw);
     static const uint8_t seqProlog[] = { 0x56, 0x8B, 0xF1, 0x80, 0x7E, 0x44, 0x00, 0x0F, 0x84 };
@@ -3872,23 +3901,23 @@ static void Init()
     if (g_gog ? PatchJmp(addr::SeqDraw, seqPrologGog, sizeof(seqPrologGog), (void*)&Stub_SeqDrawGog)
               : PatchJmp(addr::SeqDraw, seqProlog, sizeof(seqProlog), (void*)&Stub_SeqDraw))
         Log("face sequence hook installed\n");
-    if (PatchCallRel32(addr::Site_CursorAnimTick, addr::CursorAnimTick, (void*)&Hook_CursorAnimTick))
+    if (PatchBranch(addr::Site_CursorAnimTick, addr::CursorAnimTick, (void*)&Hook_CursorAnimTick))
         Log("cursor animation hook installed\n");
-    if (PatchCallRel32(addr::Site_InvEffectStep, addr::InvEffectStep, (void*)&Hook_InvEffectStep))
+    if (PatchBranch(addr::Site_InvEffectStep, addr::InvEffectStep, (void*)&Hook_InvEffectStep))
         Log("inventory effect hook installed\n");
-    if (PatchCallRel32(addr::Site_InvEffectDraw, addr::InvEffectDraw, (void*)&Hook_InvEffectDraw))
+    if (PatchBranch(addr::Site_InvEffectDraw, addr::InvEffectDraw, (void*)&Hook_InvEffectDraw))
         Log("inventory effect draw hook installed\n");
     int caretOk = 0;
     int caretSites = 0;
     for (uintptr_t site : addr::Sites_TextFieldDraw) {
         if (!site) continue;
         caretSites++;
-        caretOk += PatchCallRel32(site, addr::TextFieldDraw, (void*)&Hook_TextFieldDraw) ? 1 : 0;
+        caretOk += PatchBranch(site, addr::TextFieldDraw, (void*)&Hook_TextFieldDraw) ? 1 : 0;
     }
     Log("text caret hooks installed: %d/%d\n", caretOk, caretSites);
     int projOk = 0;
     for (uintptr_t site : addr::Site_ObjProject)
-        projOk += PatchCallRel32(site, addr::ObjProject, (void*)&Hook_ObjProject) ? 1 : 0;
+        projOk += PatchBranch(site, addr::ObjProject, (void*)&Hook_ObjProject) ? 1 : 0;
     Log("object projection hooks installed: %d/3\n", projOk);
     {
         char ini[MAX_PATH];
