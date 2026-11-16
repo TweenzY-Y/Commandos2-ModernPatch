@@ -44,6 +44,12 @@ thunk `0x404d88`. Inventory manager draw wrapper `0x49a180` (called at `0x45bd08
 window class (`V_CVentana`) is not identifiable without RTTI: its vtable is read from the
 first mission's root window (`mission+0x59C` -> `+4`).
 
+GOG build, cheats and inventory quick clicks: mission input `0x60ec10` (called at
+`0x51cb10`), password matcher `0x718fc0` at `0x60ec66` (object `0xB652A8`, original password
+`GONZOANDJON`), cheat flag `CJuego+0xEA`; grid event case table `0x5d5540`. The water
+rasterizer and span renderer and the camera's map draw are inlined into larger functions
+in this build, so the optimizations and the map background cache are not available.
+
 GOG build, HD mode and map fixes: size getters `0x4ecf30`/`0x4ecf80`/`0x4ecfd0`/`0x4ed010`/
 `0x4ed070`, clamps `0x4ecf12`/`0x4ec4cf`, `SetVideoMode` `0x4546e0` (six callers), label
 `0x476110` (lookup `0x414ef0` at `0x47614a`), steps `0x476374`, `0x476b7e`, `0x476d28`

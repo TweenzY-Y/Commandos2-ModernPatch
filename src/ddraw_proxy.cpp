@@ -2743,10 +2743,14 @@ static void PatchMapCache()
 // event - 0x201 through the byte table at 0x93092C; send 0x208 to the 0x202 case
 // (as the game already does for 0x20A / 0x204).
 // ---------------------------------------------------------------------------
+namespace addr {
+    static uintptr_t InvGridEventCases = 0x93092c;   // byte per game event, from kGameEventFirst
+}
+constexpr int kGameEventFirst = 0x201, kGameEventClick = 0x202, kGameEventDoubleClick = 0x208;
 static void PatchInventoryDoubleClick()
 {
-    uint8_t* p = (uint8_t*)(0x93092c + (0x208 - 0x201));
-    const uint8_t* click = (const uint8_t*)(0x93092c + (0x202 - 0x201));
+    uint8_t* p = (uint8_t*)(addr::InvGridEventCases + (kGameEventDoubleClick - kGameEventFirst));
+    const uint8_t* click = (const uint8_t*)(addr::InvGridEventCases + (kGameEventClick - kGameEventFirst));
     if (*p != 3 || *click != 1) { Log("inventory double-click fix: unexpected bytes\n"); return; }
     DWORD old;
     VirtualProtect(p, 1, PAGE_EXECUTE_READWRITE, &old);
@@ -3776,7 +3780,7 @@ static void UseGogAddresses()
     Site_CursorDrawNow = 0; CursorDrawNow = 0;
     Sites_CursorDrawInner[0] = 0x90ac69; Sites_CursorDrawInner[1] = 0x90ad5f; CursorDrawInner = 0x90ad70;
     IAT_GetCursorPos = 0xBAAC14;
-    // not ported yet: cheats, map background cache, water rendering, inventory double click
+    // not available: map background cache and water rendering (inlined in this build)
     // HD pause menu
     VT_MenuInGame = 0xAE8E60; Site_PauseWorld = 0x464168; MisionDraw = 0x51c810; Site_PauseScreenSz = 0x464178;
     Site_MenuLayoutSz = 0x47acb6; Site_PauseLayout = 0x4642d0; MenuLayout = 0x47aca0; GetScreenSize = 0x40ee50;
@@ -3794,7 +3798,9 @@ static void UseGogAddresses()
     InvMgrDraw = 0x49a180; Site_InvMgrDrawCall = 0x45bd08; Site_InvMgrDrawJmp = 0x4619eb;
     MissionDraw = 0x51c810; Site_InvMissionDraw = 0x4c53f2;
     Site_ManualDraw = 0x461828; ManualDraw = 0x52ab20;
-    Site_CheatInput = 0; CheatInput = 0; Site_CheatMatch = 0; CheatMatch = 0;
+    // cheats, inventory quick clicks
+    Site_CheatInput = 0x51cb10; CheatInput = 0x60ec10; Site_CheatMatch = 0x60ec66; CheatMatch = 0x718fc0;
+    InvGridEventCases = 0x5d5540;
     RastEdgeUV = 0; WaterSpanRow = 0; Site_MapDraw = 0; MapDraw = 0;
 
     // HD video mode (index 4, after 1280x1024 which the GOG options screen does not offer)
@@ -3859,9 +3865,8 @@ static void Init()
     } else if (IsGogBuild()) {
         g_gog = true;
         UseGogAddresses();
-        g_cfg.cheats = false;   // not ported to this version yet
         if (g_cfg.debug > 1) g_cfg.debug = 1;
-        Log("game version: GOG / original 2001 build (cheats and optimizations not available yet)\n");
+        Log("game version: GOG / original 2001 build (no rendering optimizations)\n");
     } else {
         Log("unexpected Comm2.exe build - hooks disabled\n");
         return;
@@ -3869,9 +3874,9 @@ static void Init()
     g_seqAddr[0] = addr::SeqDraw_Continue; g_seqAddr[1] = addr::SeqDraw_DrawOnly; g_seqAddr[2] = addr::SeqDraw_Exit;
     PatchHDMode();
     PatchTileBlitOverflow();   // game bug fix, needed for resolutions above 1280x720
+    PatchCheats();
+    PatchInventoryDoubleClick();   // game bug fix
     if (!g_gog) {
-        PatchCheats();
-        PatchInventoryDoubleClick();   // game bug fix
         char ini[MAX_PATH];
         sprintf_s(ini, "%s\\" MOD_NAME ".ini", g_dir);
         if (GetPrivateProfileIntA(MOD_NAME, "Optimizations", 1, ini)) PatchPerformance();

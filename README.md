@@ -73,8 +73,8 @@ applies its changes in memory while the game runs.
     (SHA-256 `3645321656e05fab2cb91cff7d416152c9276d821ffef85cd0399bd4a15d1aaa`): all features.
   - **GOG version** `comm2.exe` (the original 2001 release, also the Steam "Legacy" folder,
     SHA-256 `f4ca330c86ad3fad293a26ba2d3425dbb69002494e6fb524e13936fcb60253be`): smoothing
-    everything except the cheat keys, the performance optimizations (water, map cache) and
-    the inventory quick-click fix, which are not available in this version yet.
+    everything except the performance optimizations (faster water drawing and the map
+    background cache): in this build that code is inlined into larger functions.
 - Windows 10 or 11.
 
 ## Installation
